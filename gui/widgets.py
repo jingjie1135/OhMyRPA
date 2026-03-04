@@ -31,6 +31,8 @@ class ScreenshotWidget(QWidget):
         self._y_offset = Y_OFFSET   # 当前 Y 偏移量
         self._mouse_pos = None      # 鼠标坐标（原图坐标系）
 
+        self._source_pixmap = None  # 用于硬件加速的高效绘图对象
+
         # 区域选取状态
         self._drag_start = None     # 拖拽起始点（原图坐标）
         self._drag_end = None       # 拖拽结束点（原图坐标）
@@ -50,6 +52,11 @@ class ScreenshotWidget(QWidget):
         if q_image is None or q_image.isNull():
             return
         self._source_image = q_image
+        
+        # 将内存中的 QImage 转换为显存中的 QPixmap 对象，利用 GPU 加速平滑缩放渲染
+        from PyQt6.QtGui import QPixmap 
+        self._source_pixmap = QPixmap.fromImage(q_image)
+
         self.update()  # 触发 paintEvent 重绘
 
     def update_matches(self, matches):
@@ -114,6 +121,7 @@ class ScreenshotWidget(QWidget):
         """
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         # 绘制深色背景
         painter.fillRect(self.rect(), QColor("#1a1a2e"))
@@ -133,10 +141,11 @@ class ScreenshotWidget(QWidget):
         dh = layout['display_h']
         scale = layout['scale']
 
-        # 绘制截图
+        # 绘制截图 (使用硬件加速的 QPixmap 结合平滑插值，降低 CPU 负担)
         target_rect = QRectF(ox, oy, dw, dh)
         source_rect = QRectF(0, 0, layout['img_w'], layout['img_h'])
-        painter.drawImage(target_rect, self._source_image, source_rect)
+        if self._source_pixmap and not self._source_pixmap.isNull():
+            painter.drawPixmap(target_rect, self._source_pixmap, source_rect)
 
         # 绘制匹配位置标记
         for name, cx, cy, score in self._matches:

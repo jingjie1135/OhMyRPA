@@ -163,8 +163,8 @@ class ScreencapWorker(QThread):
             # 创建 scrcpy 客户端
             client = scrcpy.Client(
                 device=self._device_id,
-                max_fps=30,
-                bitrate=4_000_000,  # 原生分辨率需要更高码率
+                max_fps=60,
+                bitrate=6_000_000,  # 原生分辨率需要更高码率
                 block_frame=True,
             )
             client.add_listener(scrcpy.EVENT_FRAME, on_frame)
