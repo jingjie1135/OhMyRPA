@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+bot.log
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Gemini / AI 工具
+.gemini/
+
+# 模板图片（用户运行时创建的外部数据）
+targets/
+popups/
+
+# 开发规范文档
+PyQt6开发规范.md
+PyQt6速查手册.md
