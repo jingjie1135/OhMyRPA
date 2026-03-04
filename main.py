@@ -9,7 +9,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import MAX_WORKERS, ERROR_SLEEP
-from adb_utils import get_connected_devices, check_resolution
+from adb_utils import get_connected_devices, get_resolution
 from shop_bot import run_shop_bot
 
 
@@ -70,7 +70,7 @@ def run_device_worker(device_id):
 
 def main():
     """
-    主函数：发现设备 → 校验分辨率 → 启动线程池。
+    主函数：发现设备 → 检测分辨率 → 启动线程池。
     """
     # 初始化日志系统
     setup_logging()
@@ -94,25 +94,20 @@ def main():
 
     logger.info("发现 %d 个设备: %s", len(devices), ", ".join(devices))
 
-    # ========== 第二步：逐一校验分辨率 ==========
-    valid_devices = []
+    # ========== 第二步：检测各设备分辨率（仅记录，不阻止） ==========
+    from config import set_device_resolution
     for device_id in devices:
-        try:
-            check_resolution(device_id)
-            valid_devices.append(device_id)
-        except (ValueError, RuntimeError) as e:
-            logger.error(str(e))
-            logger.error("[%s] 分辨率校验未通过，跳过此设备", device_id)
+        w, h = get_resolution(device_id)
+        if w > 0 and h > 0:
+            set_device_resolution(w, h)
+            logger.info("[%s] 设备分辨率: %dx%d", device_id, w, h)
+        else:
+            logger.warning("[%s] 无法获取分辨率", device_id)
 
-    if not valid_devices:
-        logger.error("所有设备分辨率校验均未通过，程序退出")
-        sys.exit(1)
-
-    logger.info("通过分辨率校验的设备 (%d/%d): %s",
-                len(valid_devices), len(devices), ", ".join(valid_devices))
+    logger.info("共 %d 个设备准备就绪", len(devices))
 
     # ========== 第三步：启动线程池，每个设备独立运行 ==========
-    worker_count = min(MAX_WORKERS, len(valid_devices))
+    worker_count = min(MAX_WORKERS, len(devices))
     logger.info("正在启动线程池 (工作线程数: %d)...", worker_count)
 
     try:
@@ -120,7 +115,7 @@ def main():
             # 为每个设备提交独立的工作线程
             futures = {
                 executor.submit(run_device_worker, dev): dev
-                for dev in valid_devices
+                for dev in devices
             }
 
             logger.info("所有设备线程已启动，脚本运行中... (Ctrl+C 停止)")

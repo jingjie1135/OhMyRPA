@@ -50,15 +50,15 @@ def get_connected_devices():
         raise RuntimeError(f"找不到 ADB: {config.ADB_PATH}，请确认已安装并加入 PATH")
 
 
-def check_resolution(device_id):
+def get_resolution(device_id):
     """
-    校验指定设备的屏幕分辨率是否符合预期。
+    获取指定设备的屏幕分辨率。
 
     Args:
         device_id (str): 设备 ID
 
-    Raises:
-        ValueError: 分辨率不匹配时抛出，提示用户调整
+    Returns:
+        tuple[int, int]: (宽, 高)；获取失败返回 (0, 0)
     """
     try:
         result = subprocess.run(
@@ -78,16 +78,14 @@ def check_resolution(device_id):
 
         size_str = size_line.split(":")[-1].strip()
         width, height = map(int, size_str.split("x"))
-
-        if width != config.EXPECTED_WIDTH or height != config.EXPECTED_HEIGHT:
-            raise ValueError(
-                f"[{device_id}] 分辨率不匹配！"
-                f"当前: {width}x{height}, 要求: {config.EXPECTED_WIDTH}x{config.EXPECTED_HEIGHT}。"
-                f"请在模拟器设置中调整分辨率。"
-            )
-        logger.info("[%s] 分辨率校验通过: %dx%d", device_id, width, height)
+        logger.info("[%s] 设备分辨率: %dx%d", device_id, width, height)
+        return width, height
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"[{device_id}] 分辨率检查超时")
+        logger.warning("[%s] 分辨率检查超时", device_id)
+        return 0, 0
+    except Exception as e:
+        logger.warning("[%s] 获取分辨率失败: %s", device_id, str(e))
+        return 0, 0
 
 
 def screencap_to_memory(device_id):

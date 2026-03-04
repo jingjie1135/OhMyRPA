@@ -129,32 +129,6 @@ class ScriptTab(QWidget):
         ctrl_layout.addWidget(self.stop_btn)
 
         layout.addWidget(ctrl_group)
-
-        # ===== 快捷操作组 =====
-        quick_group = QGroupBox("快捷操作")
-        quick_group.setFont(create_font(9, bold=True))
-        quick_layout = QHBoxLayout(quick_group)
-
-        self.screenshot_btn = QPushButton("📸 手动截图")
-        self.screenshot_btn.setFont(create_font())
-        self.screenshot_btn.setFixedSize(110, 30)
-
-        self.set_refresh_btn = QPushButton("📍 设为刷新坐标")
-        self.set_refresh_btn.setFont(create_font())
-        self.set_refresh_btn.setFixedSize(130, 30)
-        self.set_refresh_btn.setToolTip("将预览区最后点击的坐标设为刷新按钮坐标")
-
-        self.live_sync_btn = QPushButton("▶ 实时同步")
-        self.live_sync_btn.setFont(create_font())
-        self.live_sync_btn.setFixedSize(110, 30)
-        self.live_sync_btn.setToolTip("持续同步模拟器画面到预览区")
-        self.live_sync_btn.setCheckable(True)
-
-        quick_layout.addWidget(self.screenshot_btn)
-        quick_layout.addWidget(self.set_refresh_btn)
-        quick_layout.addWidget(self.live_sync_btn)
-
-        layout.addWidget(quick_group)
         layout.addStretch()
 
     def _add_param_row(self, grid_layout, row, label_text, widget):

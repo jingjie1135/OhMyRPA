@@ -16,9 +16,23 @@ TARGETS_DIR = os.path.join(BASE_DIR, "targets")
 POPUPS_DIR = os.path.join(BASE_DIR, "popups")
 
 # ===================== 分辨率配置 =====================
-# 模拟器强制固定分辨率（宽 x 高）
-EXPECTED_WIDTH = 540
-EXPECTED_HEIGHT = 960
+# 运行时检测到的设备分辨率（连接设备后自动设置）
+DEVICE_WIDTH = 0
+DEVICE_HEIGHT = 0
+
+
+def set_device_resolution(w, h):
+    """运行时更新设备分辨率（GUI 选择设备后调用）。"""
+    global DEVICE_WIDTH, DEVICE_HEIGHT
+    DEVICE_WIDTH = w
+    DEVICE_HEIGHT = h
+
+
+def get_resolution_tag():
+    """获取分辨率标签字符串，用于文件名。如 '1280x720'。"""
+    if DEVICE_WIDTH > 0 and DEVICE_HEIGHT > 0:
+        return f"{DEVICE_WIDTH}x{DEVICE_HEIGHT}"
+    return "unknown"
 
 # ===================== 图像识别配置 =====================
 # 模板匹配相似度阈值（0.0 ~ 1.0），越高越严格

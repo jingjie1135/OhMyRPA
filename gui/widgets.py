@@ -162,8 +162,8 @@ class ScreenshotWidget(QWidget):
                 painter.setPen(pen_link)
                 painter.drawLine(int(sx), int(sy), int(sx), int(buy_sy))
 
-            # 标签文字
-            painter.setPen(QColor(255, 255, 255))
+            # 标签文字（绿色）
+            painter.setPen(QColor(0, 220, 80))
             painter.setFont(create_font(8))
             painter.drawText(int(sx + 14), int(sy - 4), f"{name} ({score:.2f})")
 
@@ -287,28 +287,88 @@ class ScreenshotWidget(QWidget):
         self.update()
 
     def _save_region(self, x, y, w, h):
-        """弹出对话框保存裁切区域为模板图片。"""
+        """弹出对话框保存裁切区域为模板图片（可选择目录）。"""
         if self._source_image is None:
             return
 
         # 裁切原图
         cropped = self._source_image.copy(x, y, w, h)
 
-        # 弹出命名对话框
-        name, ok = QInputDialog.getText(
-            self, "保存模板图片",
-            f"区域: ({x}, {y}) {w}×{h}\n请输入模板名称（不含扩展名）:",
-        )
-        if not ok or not name.strip():
-            self._drag_start = None
-            self._drag_end = None
-            self.update()
-            return
+        # 获取可用子目录列表
+        from config import TARGETS_DIR, get_resolution_tag
+        main_win = self.window()
+        library_tab = getattr(main_win, 'library_tab', None)
+        dirs = library_tab.get_all_dirs() if library_tab else ["default"]
+        current_dir = library_tab.dir_combo.currentText() if library_tab else dirs[0]
 
-        # 保存到 targets 目录
-        os.makedirs(TARGETS_DIR, exist_ok=True)
-        save_path = os.path.join(TARGETS_DIR, f"{name.strip()}.png")
-        cropped.save(save_path, "PNG")
+        # 循环：取消覆盖时重新回到输入对话框
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QComboBox, QMessageBox
+        saved = False
+        while not saved:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("保存模板图片")
+            form = QFormLayout(dlg)
+
+            # 目录选择
+            dir_combo = QComboBox()
+            dir_combo.addItems(dirs)
+            idx = dir_combo.findText(current_dir)
+            if idx >= 0:
+                dir_combo.setCurrentIndex(idx)
+            form.addRow("保存目录:", dir_combo)
+
+            # 名称输入
+            name_edit = QLineEdit()
+            name_edit.setPlaceholderText("请输入模板名称")
+            name_edit.setMinimumHeight(32)
+            form.addRow(f"名称 ({w}×{h}):", name_edit)
+            name_edit.setFocus()
+
+            # 确认按钮
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(dlg.accept)
+            buttons.rejected.connect(dlg.reject)
+            form.addRow(buttons)
+
+            if dlg.exec() != QDialog.DialogCode.Accepted or not name_edit.text().strip():
+                # 用户关闭对话框，彻底取消
+                self._drag_start = None
+                self._drag_end = None
+                self.update()
+                return
+
+            # 构建保存路径
+            save_dir = os.path.join(TARGETS_DIR, dir_combo.currentText())
+            os.makedirs(save_dir, exist_ok=True)
+            res_tag = get_resolution_tag()
+            base_name = name_edit.text().strip()
+            current_dir = dir_combo.currentText()  # 记住目录选择
+            save_path = os.path.join(save_dir, f"{base_name}@{res_tag}.png")
+
+            # 同名文件检测
+            if os.path.exists(save_path):
+                reply = QMessageBox.question(
+                    self, "文件已存在",
+                    f"模板 \"{base_name}\" 已存在，是否覆盖？\n选择\"否\"将自动添加编号。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel
+                )
+                if reply == QMessageBox.StandardButton.Cancel:
+                    continue  # 回到输入对话框
+                if reply == QMessageBox.StandardButton.No:
+                    n = 1
+                    while True:
+                        save_path = os.path.join(
+                            save_dir, f"{base_name}_{n}@{res_tag}.png"
+                        )
+                        if not os.path.exists(save_path):
+                            break
+                        n += 1
+
+            cropped.save(save_path, "PNG")
+            saved = True
 
         # 清除选区
         self._drag_start = None
@@ -316,6 +376,10 @@ class ScreenshotWidget(QWidget):
         self.update()
 
         # 通知主窗口
-        main_win = self.window()
         if hasattr(main_win, '_append_log'):
             main_win._append_log(f"模板已保存: {save_path} ({w}×{h})")
+
+        # 刷新图库
+        if library_tab:
+            library_tab.dir_combo.setCurrentText(dir_combo.currentText())
+            library_tab._load_images()

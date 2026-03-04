@@ -6,7 +6,7 @@ import sys
 import subprocess
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSlot, pyqtSignal
 from PyQt6.QtGui import QFont, QImage
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (
 )
 
 import config
-from config import scan_adb_paths, set_adb_path
-from adb_utils import get_connected_devices
+from config import scan_adb_paths, set_adb_path, set_device_resolution
+from adb_utils import get_connected_devices, get_resolution
 from bot_worker import BotWorker
 
 from gui.constants import (
@@ -27,6 +27,27 @@ from gui.constants import (
 from gui.workers import ScreencapWorker
 from gui.widgets import ScreenshotWidget
 from gui.tabs import ImageLibraryTab, ScriptTab, WorkflowTab
+
+
+class AdbTask(QThread):
+    """
+    通用 ADB 后台任务线程：避免阻塞 UI。
+    将任意 callable 放到后台执行，完成后通过信号回调。
+    """
+    finished = pyqtSignal(object)  # 携带返回值
+    error = pyqtSignal(str)        # 携带错误信息
+
+    def __init__(self, fn, *args, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._args = args
+
+    def run(self):
+        try:
+            result = self._fn(*self._args)
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -54,8 +75,8 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         """构建主界面布局。"""
         self.setWindowTitle("模拟器 · 自动化脚本 v0.1")
-        self.resize(950, 700)
-        self.setMinimumSize(800, 600)
+        self.resize(1000, 800)
+        self.setMinimumSize(1000, 800)
 
         # 中央控件
         central = QWidget()
@@ -134,14 +155,46 @@ class MainWindow(QMainWindow):
         self.fps_label.setMinimumWidth(80)
         top_bar.addWidget(self.fps_label)
 
+        self.resolution_label = QLabel("")
+        self.resolution_label.setFont(create_font(8))
+        self.resolution_label.setStyleSheet(f"color: {COLOR_DISABLED};")
+        top_bar.addWidget(self.resolution_label)
+
         main_layout.addLayout(top_bar)
 
         # ===== 中部：截图预览 + 功能面板 =====
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左侧：截图预览
+        # 左侧：截图预览 + 侧边栏
+        preview_container = QWidget()
+        preview_layout = QHBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(4)
+
         self.screenshot_widget = ScreenshotWidget()
-        splitter.addWidget(self.screenshot_widget)
+        preview_layout.addWidget(self.screenshot_widget, 1)
+
+        # 侧边栏：截图 + 实时同步按钮（竖排）
+        sidebar = QVBoxLayout()
+        sidebar.setSpacing(6)
+
+        self.screenshot_btn = QPushButton("📸\n截图")
+        self.screenshot_btn.setFont(create_font(9))
+        self.screenshot_btn.setFixedSize(50, 50)
+        self.screenshot_btn.setToolTip("手动截图")
+        sidebar.addWidget(self.screenshot_btn)
+
+        self.live_sync_btn = QPushButton("▶\n同步")
+        self.live_sync_btn.setFont(create_font(9))
+        self.live_sync_btn.setFixedSize(50, 50)
+        self.live_sync_btn.setToolTip("持续同步模拟器画面到预览区")
+        self.live_sync_btn.setCheckable(True)
+        sidebar.addWidget(self.live_sync_btn)
+
+        sidebar.addStretch()
+        preview_layout.addLayout(sidebar)
+
+        splitter.addWidget(preview_container)
 
         # 右侧：功能 Tab 页
         self.tab_widget = QTabWidget()
@@ -196,9 +249,8 @@ class MainWindow(QMainWindow):
         self.script_tab.start_btn.clicked.connect(self._on_start)
         self.script_tab.pause_btn.clicked.connect(self._on_pause)
         self.script_tab.stop_btn.clicked.connect(self._on_stop)
-        self.script_tab.screenshot_btn.clicked.connect(self._on_manual_screenshot)
-        self.script_tab.set_refresh_btn.clicked.connect(self._on_set_refresh_coord)
-        self.script_tab.live_sync_btn.clicked.connect(self._on_toggle_live_sync)
+        self.screenshot_btn.clicked.connect(self._on_manual_screenshot)
+        self.live_sync_btn.clicked.connect(self._on_toggle_live_sync)
 
         # Y 偏移变化时实时更新预览标记
         self.script_tab.y_offset_spin.valueChanged.connect(
@@ -320,10 +372,10 @@ class MainWindow(QMainWindow):
             }}
         """)
 
-    # ==================== ADB / 设备管理 ====================
+    # ==================== ADB / 设备管理（后台线程，不阻塞 UI） ====================
 
     def _on_adb_changed(self, index):
-        """ADB 路径切换：更新全局配置。"""
+        """切换 ADB 路径。"""
         if index < 0:
             return
         adb_path = self.adb_combo.itemData(index)
@@ -332,36 +384,84 @@ class MainWindow(QMainWindow):
         self._append_log(f"已切换 ADB: {adb_name}")
 
     def _restart_adb(self):
-        """重启 ADB 服务器：使用当前选中的 ADB 执行 kill-server + start-server。"""
-        _flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        adb = config.ADB_PATH
-        adb_name = self.adb_combo.currentText()
-        self._append_log(f"正在重启 ADB 服务器 ({adb_name})...")
+        """后台重启 ADB 服务器（不阻塞 UI）。"""
+        self.restart_adb_btn.setEnabled(False)
+        self._append_log(f"正在重启 ADB 服务器 ({self.adb_combo.currentText()})...")
 
-        try:
+        def _do_restart():
+            _flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            adb = config.ADB_PATH
             subprocess.run([adb, "kill-server"],
                            capture_output=True, timeout=10, creationflags=_flags)
             subprocess.run([adb, "start-server"],
                            capture_output=True, timeout=15, creationflags=_flags)
-            self._append_log("ADB 服务器已重启")
-            self._refresh_devices()
-        except subprocess.TimeoutExpired:
-            self._append_log("重启 ADB 超时，请检查 ADB 是否可用")
-        except Exception as e:
-            self._append_log(f"重启 ADB 失败: {e}")
+            return True
+
+        task = AdbTask(_do_restart, parent=self)
+        task.finished.connect(lambda _: self._on_restart_done())
+        task.error.connect(lambda e: self._on_restart_error(e))
+        self._adb_task = task  # 保持引用防止 GC
+        task.start()
+
+    def _on_restart_done(self):
+        self.restart_adb_btn.setEnabled(True)
+        self._append_log("ADB 服务器已重启")
+        self._refresh_devices()
+
+    def _on_restart_error(self, err):
+        self.restart_adb_btn.setEnabled(True)
+        self._append_log(f"重启 ADB 失败: {err}")
 
     def _refresh_devices(self):
-        """刷新已连接设备列表。"""
+        """后台刷新设备列表（不阻塞 UI）。"""
+        self.refresh_device_btn.setEnabled(False)
         self.device_combo.clear()
-        try:
-            devices = get_connected_devices()
-            if devices:
-                self.device_combo.addItems(devices)
-                self._append_log(f"发现 {len(devices)} 个设备: {', '.join(devices)}")
-            else:
-                self._append_log("未发现设备，请检查模拟器是否启动")
-        except Exception as e:
-            self._append_log(f"设备扫描失败: {str(e)}")
+        self.device_combo.addItem("扫描中...")
+
+        task = AdbTask(get_connected_devices, parent=self)
+        task.finished.connect(self._on_devices_found)
+        task.error.connect(self._on_devices_error)
+        self._adb_task = task
+        task.start()
+
+    @pyqtSlot(object)
+    def _on_devices_found(self, devices):
+        """设备扫描完成回调。"""
+        self.refresh_device_btn.setEnabled(True)
+        self.device_combo.clear()
+        if devices:
+            self.device_combo.addItems(devices)
+            self._append_log(f"发现 {len(devices)} 个设备: {', '.join(devices)}")
+            self._detect_resolution(devices[0])
+        else:
+            self._append_log("未发现设备，请检查模拟器是否启动")
+            self.resolution_label.setText("")
+
+    @pyqtSlot(str)
+    def _on_devices_error(self, err):
+        self.refresh_device_btn.setEnabled(True)
+        self.device_combo.clear()
+        self._append_log(f"设备扫描失败: {err}")
+
+    def _detect_resolution(self, device_id):
+        """后台检测设备分辨率（不阻塞 UI）。"""
+        task = AdbTask(get_resolution, device_id, parent=self)
+        task.finished.connect(self._on_resolution_found)
+        task.error.connect(lambda e: self._append_log(f"分辨率检测失败: {e}"))
+        self._adb_task = task
+        task.start()
+
+    @pyqtSlot(object)
+    def _on_resolution_found(self, result):
+        """分辨率检测完成回调。"""
+        w, h = result
+        if w > 0 and h > 0:
+            set_device_resolution(w, h)
+            self.resolution_label.setText(f"{w}×{h}")
+            self._append_log(f"设备分辨率: {w}×{h}")
+        else:
+            self.resolution_label.setText("分辨率未知")
+            self._append_log("无法获取设备分辨率")
 
     # ==================== 控制按钮 ====================
 
@@ -468,34 +568,26 @@ class MainWindow(QMainWindow):
             worker = self._ensure_screencap_worker()
             if worker is None:
                 self._append_log("请先选择一个设备")
-                self.script_tab.live_sync_btn.setChecked(False)
+                self.live_sync_btn.setChecked(False)
                 return
 
             worker.setup(self.device_combo.currentText(), continuous=True)
             if not worker.isRunning():
                 worker.start()
 
-            self.script_tab.live_sync_btn.setText("⏹ 停止同步")
-            self.script_tab.screenshot_btn.setEnabled(False)
+            self.live_sync_btn.setText("⏹\n停止")
+            self.screenshot_btn.setEnabled(False)
             self._append_log("实时画面同步已启动")
         else:
             if self._screencap_worker is not None:
                 self._screencap_worker.requestInterruption()
                 self._screencap_worker.wait(2000)
 
-            self.script_tab.live_sync_btn.setText("▶ 实时同步")
-            self.script_tab.screenshot_btn.setEnabled(True)
+            self.live_sync_btn.setText("▶\n同步")
+            self.screenshot_btn.setEnabled(True)
             self._append_log("实时画面同步已停止")
 
-    def _on_set_refresh_coord(self):
-        """将最近拾取的坐标设为刷新按钮坐标。"""
-        if self._last_picked_coord:
-            x, y = self._last_picked_coord
-            self.script_tab.refresh_x_spin.setValue(x)
-            self.script_tab.refresh_y_spin.setValue(y)
-            self._append_log(f"已设置刷新按钮坐标为 ({x}, {y})")
-        else:
-            self._append_log("请先在预览图上点击选取坐标")
+
 
     # ==================== 参数同步 ====================
 
@@ -548,8 +640,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时安全停止所有工作线程。"""
-        if self.script_tab.live_sync_btn.isChecked():
-            self.script_tab.live_sync_btn.setChecked(False)
+        if self.live_sync_btn.isChecked():
+            self.live_sync_btn.setChecked(False)
             self._on_toggle_live_sync(False)
         if self._worker is not None and self._worker.isRunning():
             self._worker.stop()
