@@ -3,6 +3,7 @@
 """
 
 import os
+import time
 
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QImage
@@ -23,6 +24,9 @@ class ScreenshotWidget(QWidget):
 
     # 区域选取完成信号：原图坐标 (x, y, w, h)
     region_selected = pyqtSignal(int, int, int, int)
+    
+    # 模板保存完成信号：保存的绝对路径
+    template_saved = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,6 +45,9 @@ class ScreenshotWidget(QWidget):
         self.setMinimumSize(300, 400)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
+        
+        # 可选：自定义保存目录，设置后 _save_region 直接保存到此目录，跳过图库目录选择
+        self.custom_save_dir = None
 
     def update_screenshot(self, q_image):
         """
@@ -212,6 +219,48 @@ class ScreenshotWidget(QWidget):
             painter.drawLine(int(smx), int(oy), int(smx), int(oy + dh))
             painter.drawLine(int(ox), int(smy), int(ox + dw), int(smy))
 
+        # 录制模式：绘制滑动轨迹箭头（绿色）
+        _rs = getattr(self, '_rec_start', None)
+        _re = getattr(self, '_rec_end', None)
+        if getattr(self, '_recording_mode', False) and _rs and _re:
+            sx1 = ox + _rs[0] * scale
+            sy1 = oy + _rs[1] * scale
+            sx2 = ox + _re[0] * scale
+            sy2 = oy + _re[1] * scale
+            # 绿色箭头线
+            pen_swipe = QPen(QColor(0, 220, 80), 3)
+            painter.setPen(pen_swipe)
+            painter.drawLine(int(sx1), int(sy1), int(sx2), int(sy2))
+            # 起点圆点
+            painter.setBrush(QColor(0, 220, 80))
+            painter.drawEllipse(int(sx1) - 4, int(sy1) - 4, 8, 8)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # 终点箭头
+            import math
+            angle = math.atan2(sy2 - sy1, sx2 - sx1)
+            arr_len = 14
+            ax1 = sx2 - arr_len * math.cos(angle - 0.4)
+            ay1 = sy2 - arr_len * math.sin(angle - 0.4)
+            ax2 = sx2 - arr_len * math.cos(angle + 0.4)
+            ay2 = sy2 - arr_len * math.sin(angle + 0.4)
+            painter.drawLine(int(sx2), int(sy2), int(ax1), int(ay1))
+            painter.drawLine(int(sx2), int(sy2), int(ax2), int(ay2))
+
+        # 绘制点击位置标记（升级找图时用，纯视觉叠加不影响裁切）
+        marker = getattr(self, '_click_marker', None)
+        if marker and layout:
+            mx, my = marker
+            smx = ox + mx * scale
+            smy = oy + my * scale
+            pen_marker = QPen(QColor(255, 50, 50), 3)
+            painter.setPen(pen_marker)
+            painter.drawLine(int(smx - 15), int(smy), int(smx + 15), int(smy))
+            painter.drawLine(int(smx), int(smy - 15), int(smx), int(smy + 15))
+            # 标注文字
+            painter.setPen(QColor(255, 50, 50))
+            painter.setFont(create_font(9))
+            painter.drawText(int(smx + 18), int(smy - 6), f"原点击 ({mx}, {my})")
+
         painter.end()
 
     def _widget_to_original(self, wx, wy):
@@ -231,13 +280,22 @@ class ScreenshotWidget(QWidget):
         return orig_x, orig_y
 
     def mousePressEvent(self, event):
-        """鼠标按下：记录拖拽起点。"""
+        """鼠标按下：录制模式下仅拾取坐标，否则记录拖拽起点。"""
         if event.button() != Qt.MouseButton.LeftButton:
             return
         result = self._widget_to_original(
             event.position().x(), event.position().y()
         )
         if result is None:
+            return
+
+        # 录制模式：记录起点，等 release 判断是点击还是滑动
+        if getattr(self, '_recording_mode', False):
+            self._rec_start = result
+            self._rec_dragging = True
+            self._rec_press_time = time.time()  # 记录按下时间
+            self._mouse_pos = result
+            self.update()
             return
 
         self._drag_start = result
@@ -254,6 +312,11 @@ class ScreenshotWidget(QWidget):
         if result is None:
             return
 
+        # 录制模式：更新拖拽终点
+        if getattr(self, '_recording_mode', False) and getattr(self, '_rec_dragging', False):
+            self._rec_end = result
+            self.update()
+
         if self._is_dragging:
             self._drag_end = result
             self.update()
@@ -263,8 +326,41 @@ class ScreenshotWidget(QWidget):
             main_win.on_coord_hover(result[0], result[1])
 
     def mouseReleaseEvent(self, event):
-        """鼠标释放：判断是单击拾取还是拖拽选区。"""
-        if event.button() != Qt.MouseButton.LeftButton or not self._is_dragging:
+        """鼠标释放：判断是单击还是拖拽选区/滑动。"""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # 录制模式：判断点击或滑动
+        if getattr(self, '_recording_mode', False) and getattr(self, '_rec_dragging', False):
+            self._rec_dragging = False
+            result = self._widget_to_original(
+                event.position().x(), event.position().y()
+            )
+            end = result if result else getattr(self, '_rec_end', self._rec_start)
+            start = self._rec_start
+            dist = ((end[0] - start[0])**2 + (end[1] - start[1])**2) ** 0.5
+            main_win = self.window()
+            if dist > 10:
+                # 滑动操作：计算实际拖拽时长
+                duration_ms = max(100, int((time.time() - getattr(self, '_rec_press_time', time.time())) * 1000))
+                if hasattr(main_win, 'on_swipe_picked'):
+                    main_win.on_swipe_picked(start[0], start[1], end[0], end[1], duration_ms)
+            else:
+                # 单击操作
+                if hasattr(main_win, 'on_coord_picked'):
+                    main_win.on_coord_picked(start[0], start[1])
+            # 保留箭头轨迹 300ms 后清除
+            self._rec_end = end  # 确保终点已更新
+            from PyQt6.QtCore import QTimer
+            def _clear_swipe_trail():
+                self._rec_start = None
+                self._rec_end = None
+                self.update()
+            QTimer.singleShot(300, _clear_swipe_trail)
+            self.update()
+            return
+
+        if not self._is_dragging:
             return
 
         self._is_dragging = False
@@ -296,29 +392,77 @@ class ScreenshotWidget(QWidget):
         self.update()
 
     def _save_region(self, x, y, w, h):
-        """弹出对话框保存裁切区域为模板图片（可选择目录）。"""
+        """弹出对话框保存裁切区域为模板图片。"""
         if self._source_image is None:
             return
 
         # 裁切原图
         cropped = self._source_image.copy(x, y, w, h)
+        from config import get_resolution_tag
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QComboBox, QMessageBox
 
-        # 获取可用子目录列表
-        from config import TARGETS_DIR, get_resolution_tag
+        if self.custom_save_dir:
+            # 简化流程：直接保存到指定目录，只要求输入名称
+            save_dir = self.custom_save_dir
+            os.makedirs(save_dir, exist_ok=True)
+            res_tag = get_resolution_tag()
+            saved = False
+            while not saved:
+                dlg = QDialog(self)
+                dlg.setWindowTitle("保存模板图片")
+                form = QFormLayout(dlg)
+                name_edit = QLineEdit()
+                name_edit.setPlaceholderText("请输入模板名称")
+                name_edit.setMinimumHeight(32)
+                form.addRow(f"名称 ({w}×{h}):", name_edit)
+                name_edit.setFocus()
+                buttons = QDialogButtonBox(
+                    QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+                )
+                buttons.accepted.connect(dlg.accept)
+                buttons.rejected.connect(dlg.reject)
+                form.addRow(buttons)
+
+                if dlg.exec() != QDialog.DialogCode.Accepted or not name_edit.text().strip():
+                    self._drag_start = None
+                    self._drag_end = None
+                    self.update()
+                    return
+
+                base_name = name_edit.text().strip()
+                save_path = os.path.join(save_dir, f"{base_name}@{res_tag}.png")
+
+                if os.path.exists(save_path):
+                    reply = QMessageBox.question(
+                        self, "文件已存在",
+                        f"模板 \"{base_name}\" 已存在，是否覆盖？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        continue
+
+                cropped.save(save_path, "PNG")
+                saved = True
+                self.template_saved.emit(save_path)
+
+            self._drag_start = None
+            self._drag_end = None
+            self.update()
+            return
+
+        # 默认流程：保存到图库目录，含目录选择
+        from config import TARGETS_DIR
         main_win = self.window()
         library_tab = getattr(main_win, 'library_tab', None)
         dirs = library_tab.get_all_dirs() if library_tab else ["default"]
         current_dir = library_tab.dir_combo.currentText() if library_tab else dirs[0]
 
-        # 循环：取消覆盖时重新回到输入对话框
-        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QComboBox, QMessageBox
         saved = False
         while not saved:
             dlg = QDialog(self)
             dlg.setWindowTitle("保存模板图片")
             form = QFormLayout(dlg)
 
-            # 目录选择
             dir_combo = QComboBox()
             dir_combo.addItems(dirs)
             idx = dir_combo.findText(current_dir)
@@ -326,14 +470,12 @@ class ScreenshotWidget(QWidget):
                 dir_combo.setCurrentIndex(idx)
             form.addRow("保存目录:", dir_combo)
 
-            # 名称输入
             name_edit = QLineEdit()
             name_edit.setPlaceholderText("请输入模板名称")
             name_edit.setMinimumHeight(32)
             form.addRow(f"名称 ({w}×{h}):", name_edit)
             name_edit.setFocus()
 
-            # 确认按钮
             buttons = QDialogButtonBox(
                 QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
             )
@@ -342,18 +484,16 @@ class ScreenshotWidget(QWidget):
             form.addRow(buttons)
 
             if dlg.exec() != QDialog.DialogCode.Accepted or not name_edit.text().strip():
-                # 用户关闭对话框，彻底取消
                 self._drag_start = None
                 self._drag_end = None
                 self.update()
                 return
 
-            # 构建保存路径
             save_dir = os.path.join(TARGETS_DIR, dir_combo.currentText())
             os.makedirs(save_dir, exist_ok=True)
             res_tag = get_resolution_tag()
             base_name = name_edit.text().strip()
-            current_dir = dir_combo.currentText()  # 记住目录选择
+            current_dir = dir_combo.currentText()
             save_path = os.path.join(save_dir, f"{base_name}@{res_tag}.png")
 
             # 同名文件检测
@@ -378,6 +518,8 @@ class ScreenshotWidget(QWidget):
 
             cropped.save(save_path, "PNG")
             saved = True
+            
+            self.template_saved.emit(save_path)
 
         # 清除选区
         self._drag_start = None

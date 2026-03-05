@@ -9,7 +9,8 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QImage
 
-from shop_bot import run_shop_bot, RuntimeConfig
+from script_engine import ScriptEngine
+from script_model import ScriptModel
 
 
 class BotWorker(QThread):
@@ -32,18 +33,24 @@ class BotWorker(QThread):
     # 线程完成信号
     finished_signal = pyqtSignal()
 
-    def __init__(self, device_id, runtime_config=None, parent=None):
+    def __init__(self, device_id, script_model: ScriptModel = None,
+                 loop_mode: bool = False, enabled_templates: list = None,
+                 parent=None):
         """
         初始化工作线程。
 
         Args:
             device_id (str): 目标设备 ID
-            runtime_config (RuntimeConfig, optional): 运行时可调参数
+            script_model (ScriptModel): JSON 解析后的动作对象
+            loop_mode (bool): 是否以循环模式运行
+            enabled_templates (list): 循环模式下启用的模板文件名列表
             parent: 父 QObject
         """
         super().__init__(parent)
         self.device_id = device_id
-        self.runtime_config = runtime_config or RuntimeConfig()
+        self.script_model = script_model or ScriptModel()
+        self.loop_mode = loop_mode
+        self.enabled_templates = enabled_templates
 
         # 暂停控制事件：set=运行, clear=暂停
         self._pause_event = threading.Event()
@@ -51,12 +58,10 @@ class BotWorker(QThread):
 
     def run(self):
         """
-        线程执行入口：调用业务逻辑主循环。
-        使用 requestInterruption 控制停止（手册 §六）。
+        线程执行入口：根据 loop_mode 选择顺序或循环执行。
         """
         self.status_signal.emit("运行中")
 
-        # 构建回调字典，将业务事件桥接到 Qt 信号
         callbacks = {
             'on_log': self._on_log,
             'on_screenshot': self._on_screenshot,
@@ -64,13 +69,18 @@ class BotWorker(QThread):
             'on_buy_count': self._on_buy_count,
         }
 
-        run_shop_bot(
+        self.engine = ScriptEngine(
+            model=self.script_model,
             device_id=self.device_id,
-            runtime_config=self.runtime_config,
             pause_event=self._pause_event,
             interrupt_check=self.isInterruptionRequested,
-            callbacks=callbacks,
+            callbacks=callbacks
         )
+        
+        if self.loop_mode:
+            self.engine.run_loop(self.enabled_templates)
+        else:
+            self.engine.run()
 
         self.status_signal.emit("已停止")
         self.finished_signal.emit()

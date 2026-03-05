@@ -26,7 +26,7 @@ from gui.constants import (
 )
 from gui.workers import ScreencapWorker
 from gui.widgets import ScreenshotWidget
-from gui.tabs import ImageLibraryTab, ScriptTab, WorkflowTab
+from gui.tabs import ImageLibraryTab, ScriptTab, LoopScriptTab, WorkflowTab
 
 
 class AdbTask(QThread):
@@ -165,9 +165,10 @@ class MainWindow(QMainWindow):
         # ===== 中部：截图预览 + 功能面板 =====
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左侧：截图预览 + 侧边栏
-        preview_container = QWidget()
-        preview_layout = QHBoxLayout(preview_container)
+        # 左侧：截图预览 + 侧边栏（录制时感知鼠标进出）
+        self.preview_container = QWidget()
+        self.preview_container.setMouseTracking(True)
+        preview_layout = QHBoxLayout(self.preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(4)
 
@@ -191,10 +192,27 @@ class MainWindow(QMainWindow):
         self.live_sync_btn.setCheckable(True)
         sidebar.addWidget(self.live_sync_btn)
 
+        # 录制期间的控制按钮（仅录制时可见）
+        self.sidebar_pause_btn = QPushButton("⏸\n暂停")
+        self.sidebar_pause_btn.setFont(create_font(9))
+        self.sidebar_pause_btn.setFixedSize(50, 50)
+        self.sidebar_pause_btn.setToolTip("暂停/继续录制")
+        self.sidebar_pause_btn.setObjectName("warningBtn")
+        self.sidebar_pause_btn.setVisible(False)
+        sidebar.addWidget(self.sidebar_pause_btn)
+
+        self.sidebar_stop_btn = QPushButton("⏹\n停止")
+        self.sidebar_stop_btn.setFont(create_font(9))
+        self.sidebar_stop_btn.setFixedSize(50, 50)
+        self.sidebar_stop_btn.setToolTip("停止录制")
+        self.sidebar_stop_btn.setObjectName("dangerBtn")
+        self.sidebar_stop_btn.setVisible(False)
+        sidebar.addWidget(self.sidebar_stop_btn)
+
         sidebar.addStretch()
         preview_layout.addLayout(sidebar)
 
-        splitter.addWidget(preview_container)
+        splitter.addWidget(self.preview_container)
 
         # 右侧：功能 Tab 页
         self.tab_widget = QTabWidget()
@@ -208,12 +226,38 @@ class MainWindow(QMainWindow):
         self.script_tab = ScriptTab()
         self.tab_widget.addTab(self.script_tab, "📜 脚本")
 
+        # 循环 Tab
+        self.loop_tab = LoopScriptTab()
+        self.tab_widget.addTab(self.loop_tab, "🔄 循环")
+
         # 流程 Tab
         self.workflow_tab = WorkflowTab()
         self.tab_widget.addTab(self.workflow_tab, "🔗 流程")
 
         # 默认选中脚本 Tab
         self.tab_widget.setCurrentIndex(1)
+
+        # 启动/停止 和 暂停/继续 按钮放在 Tab 栏右侧
+        corner_widget = QWidget()
+        corner_layout = QHBoxLayout(corner_widget)
+        corner_layout.setContentsMargins(0, 0, 4, 0)
+        corner_layout.setSpacing(4)
+
+        self.start_btn = QPushButton("▶ 启动")
+        self.start_btn.setFont(create_font(10, bold=True))
+        self.start_btn.setFixedSize(80, 28)
+        self.start_btn.setObjectName("successBtn")
+        self.start_btn.setCheckable(True)
+
+        self.pause_btn = QPushButton("⏸ 暂停")
+        self.pause_btn.setFont(create_font(10, bold=True))
+        self.pause_btn.setFixedSize(80, 28)
+        self.pause_btn.setObjectName("warningBtn")
+        self.pause_btn.setEnabled(False)
+
+        corner_layout.addWidget(self.start_btn)
+        corner_layout.addWidget(self.pause_btn)
+        self.tab_widget.setCornerWidget(corner_widget)
 
         splitter.addWidget(self.tab_widget)
         splitter.setStretchFactor(0, 3)
@@ -246,16 +290,43 @@ class MainWindow(QMainWindow):
         self.adb_combo.currentIndexChanged.connect(self._on_adb_changed)
         self.refresh_device_btn.clicked.connect(self._refresh_devices)
         self.restart_adb_btn.clicked.connect(self._restart_adb)
-        self.script_tab.start_btn.clicked.connect(self._on_start)
-        self.script_tab.pause_btn.clicked.connect(self._on_pause)
-        self.script_tab.stop_btn.clicked.connect(self._on_stop)
+        self.start_btn.toggled.connect(self._on_start_toggled)
+        self.pause_btn.clicked.connect(self._on_pause)
         self.screenshot_btn.clicked.connect(self._on_manual_screenshot)
         self.live_sync_btn.clicked.connect(self._on_toggle_live_sync)
+
+        # 预览区鼠标进出事件过滤（录制时自动暂停/恢复）
+        self.preview_container.installEventFilter(self)
+
+        # 侧边栏录制控制按钮
+        self.sidebar_stop_btn.clicked.connect(self.script_tab._on_stop_record)
+        self.sidebar_pause_btn.clicked.connect(self.script_tab._toggle_record_pause)
 
         # Y 偏移变化时实时更新预览标记
         self.script_tab.y_offset_spin.valueChanged.connect(
             self.screenshot_widget.set_y_offset
         )
+
+    def eventFilter(self, obj, event):
+        """预览区鼠标进出事件：录制时自动暂停/恢复，遮罩始终保持"""
+        from PyQt6.QtCore import QEvent
+        if obj is self.preview_container and self.script_tab.is_recording:
+            if event.type() == QEvent.Type.Leave:
+                # 鼠标离开预览区 → 自动暂停
+                if not self.script_tab._recording_paused:
+                    self.script_tab._toggle_record_pause()
+            elif event.type() == QEvent.Type.Enter:
+                # 鼠标进入预览区 → 自动恢复
+                if self.script_tab._recording_paused:
+                    self.script_tab._toggle_record_pause()
+        return super().eventFilter(obj, event)
+
+    def _create_dim_effect(self):
+        """创建变暗效果"""
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        effect = QGraphicsOpacityEffect()
+        effect.setOpacity(0.3)
+        return effect
 
     def _apply_styles(self):
         """应用全局样式（手册 §十二配色规范）。"""
@@ -465,15 +536,59 @@ class MainWindow(QMainWindow):
 
     # ==================== 控制按钮 ====================
 
-    def _on_start(self):
-        """启动按钮：创建并启动工作线程。"""
+    def _on_start_toggled(self, checked):
+        """启动/停止 切换按钮。"""
+        if checked:
+            self._do_start()
+        else:
+            self._do_stop()
+
+    def _do_start(self):
+        """启动工作线程。"""
         device_id = self.device_combo.currentText()
         if not device_id:
             self._append_log("请先选择一个设备")
+            self.start_btn.setChecked(False)
             return
 
+        # 判断当前 Tab 决定执行模式
+        current_tab = self.tab_widget.currentWidget()
+        is_loop_mode = isinstance(current_tab, LoopScriptTab)
+        
+        if is_loop_mode:
+            if not self.loop_tab.current_model:
+                self._append_log("请先在循环 Tab 中导入一个脚本项目")
+                self.start_btn.setChecked(False)
+                return
+            script_model = self.loop_tab.current_model
+            enabled_templates = self.loop_tab.get_enabled_templates()
+        else:
+            script_model = self.script_tab.current_model
+            enabled_templates = None
+
+        # 预检查：脚本分辨率与模拟器分辨率是否一致
+        script_cfg = script_model.config
+        if script_cfg.check_resolution and script_cfg.resolution and script_cfg.resolution != "unknown":
+            from config import get_resolution_tag
+            device_res = get_resolution_tag()
+            if device_res != "unknown" and script_cfg.resolution != device_res:
+                from PyQt6.QtWidgets import QMessageBox
+                reply = QMessageBox.warning(
+                    self, "分辨率不匹配",
+                    f"脚本适配分辨率为 {script_cfg.resolution}，\n当前模拟器分辨率为 {device_res}。\n\n"
+                    "分辨率不一致可能导致找图失败，是否强制启动？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    self.start_btn.setChecked(False)
+                    return
+
         self._runtime_config = self.script_tab.get_runtime_config()
-        self._worker = BotWorker(device_id, self._runtime_config, parent=self)
+        self._worker = BotWorker(
+            device_id, script_model=script_model,
+            loop_mode=is_loop_mode, enabled_templates=enabled_templates,
+            parent=self
+        )
 
         self._worker.log_signal.connect(self._append_log)
         self._worker.screenshot_signal.connect(self.screenshot_widget.update_screenshot)
@@ -485,10 +600,13 @@ class MainWindow(QMainWindow):
         self._worker.start()
         self._sync_timer.start(500)
 
-        # UI 状态更新
-        self.script_tab.start_btn.setEnabled(False)
-        self.script_tab.pause_btn.setEnabled(True)
-        self.script_tab.stop_btn.setEnabled(True)
+        # UI 状态更新：按钮切换为停止模式
+        self.start_btn.setText("⏹ 停止")
+        self.start_btn.setObjectName("dangerBtn")
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
+        self.pause_btn.setEnabled(True)
+        self.tab_widget.tabBar().setEnabled(False)  # 运行时禁止切换 Tab
         self.device_combo.setEnabled(False)
         self._buy_count = 0
 
@@ -499,15 +617,15 @@ class MainWindow(QMainWindow):
 
         if self._worker.is_paused():
             self._worker.resume()
-            self.script_tab.pause_btn.setText("⏸ 暂停")
+            self.pause_btn.setText("⏸ 暂停")
             self._append_log("已恢复运行")
         else:
             self._worker.pause()
-            self.script_tab.pause_btn.setText("▶ 继续")
+            self.pause_btn.setText("▶ 继续")
             self._append_log("已暂停")
 
-    def _on_stop(self):
-        """停止按钮（手册 §六资源保护）。"""
+    def _do_stop(self):
+        """停止工作线程（手册 §六资源保护）。"""
         if self._worker is None:
             return
 
@@ -522,10 +640,17 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._runtime_config = None
 
-        self.script_tab.start_btn.setEnabled(True)
-        self.script_tab.pause_btn.setEnabled(False)
-        self.script_tab.pause_btn.setText("⏸ 暂停")
-        self.script_tab.stop_btn.setEnabled(False)
+        # 恢复按钮为启动状态
+        self.start_btn.blockSignals(True)
+        self.start_btn.setChecked(False)
+        self.start_btn.blockSignals(False)
+        self.start_btn.setText("▶ 启动")
+        self.start_btn.setObjectName("successBtn")
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
+        self.pause_btn.setEnabled(False)
+        self.pause_btn.setText("⏸ 暂停")
+        self.tab_widget.tabBar().setEnabled(True)  # 恢复 Tab 切换
         self.device_combo.setEnabled(True)
         self._update_status("已停止")
 
@@ -602,7 +727,25 @@ class MainWindow(QMainWindow):
         """截图预览区坐标拾取回调。"""
         self._last_picked_coord = (x, y)
         self.coord_label.setText(f"坐标: ({x}, {y})")
-        self._append_log(f"拾取坐标: ({x}, {y})")
+        
+        # 劫持模式拦截：在此将坐标分发给开启录制的脚本面板
+        if getattr(self.script_tab, 'is_recording', False):
+            self._append_log(f"🔴 [录制] 正在生成步骤指令 ({x}, {y})...")
+            device_id = self.device_combo.currentText()
+            self.script_tab.on_recorded_click(device_id, x, y)
+        else:
+            self._append_log(f"拾取坐标: ({x}, {y})")
+
+    def on_swipe_picked(self, x1, y1, x2, y2, duration_ms=300):
+        """截图预览区滑动拾取回调。"""
+        self.coord_label.setText(f"滑动: ({x1},{y1})→({x2},{y2}) {duration_ms}ms")
+        
+        if getattr(self.script_tab, 'is_recording', False):
+            self._append_log(f"🔴 [录制] 滑动 ({x1},{y1})→({x2},{y2}) {duration_ms}ms")
+            device_id = self.device_combo.currentText()
+            self.script_tab.on_recorded_swipe(device_id, x1, y1, x2, y2, duration_ms)
+        else:
+            self._append_log(f"滑动: ({x1},{y1})→({x2},{y2})")
 
     def on_coord_hover(self, x, y):
         """截图预览区鼠标悬停坐标回调。"""

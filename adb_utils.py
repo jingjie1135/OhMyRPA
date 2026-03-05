@@ -213,3 +213,26 @@ def tap(device_id, x, y):
         logger.debug("[%s] 点击坐标 (%d, %d)", device_id, x, y)
     except subprocess.TimeoutExpired:
         logger.warning("[%s] 点击命令超时: (%d, %d)", device_id, x, y)
+
+
+def swipe(device_id, x1, y1, x2, y2, duration_ms=300):
+    """
+    执行 ADB 滑动操作。
+
+    Args:
+        device_id (str): 设备 ID
+        x1, y1 (int): 起始坐标
+        x2, y2 (int): 结束坐标
+        duration_ms (int): 滑动时长（毫秒）
+    """
+    try:
+        subprocess.run(
+            [config.ADB_PATH, "-s", device_id, "shell", "input", "swipe",
+             str(x1), str(y1), str(x2), str(y2), str(duration_ms)],
+            capture_output=True,
+            timeout=10,
+            creationflags=_SUBPROCESS_FLAGS
+        )
+        logger.debug("[%s] 滑动 (%d,%d) → (%d,%d) %dms", device_id, x1, y1, x2, y2, duration_ms)
+    except subprocess.TimeoutExpired:
+        logger.warning("[%s] 滑动命令超时", device_id)
