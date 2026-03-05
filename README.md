@@ -28,6 +28,7 @@
 ├── main.py                 # 命令行入口
 ├── targets/                # 模板图片目录
 ├── popups/                 # 弹窗模板
+├── Scripts/                # 自定义脚本和录制文件存储目录
 └── requirements.txt        # 依赖列表
 ```
 

@@ -38,3 +38,6 @@ popups/
 # 开发规范文档
 PyQt6开发规范.md
 PyQt6速查手册.md
+
+# 脚本相关文件夹
+Scripts/
