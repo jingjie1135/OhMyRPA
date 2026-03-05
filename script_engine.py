@@ -5,6 +5,7 @@ import cv2
 from script_model import ScriptModel, ActionNode
 from adb_utils import screencap_to_memory, tap
 import image_engine
+import template_meta
 
 class ScriptEngine:
     """
@@ -238,6 +239,56 @@ class ScriptEngine:
             # 循环指令尚未实现，输出警告避免用户困惑
             self._log(f"⚠️ 循环指令 [{action_type}] 尚未实现，已跳过。")
 
+        elif action_type == "multi_match":
+            # 多模板匹配：截图 → 逐模板搜索 → 点击第一个命中的
+            templates = p.get("templates", [])
+            if not templates:
+                self._log("⚠️ 多图匹配指令无模板配置，跳过。")
+                return
+            
+            self._log(f"🎯 多图匹配: {len(templates)} 个模板")
+            
+            # 预加载所有模板
+            all_loaded = []
+            for tpl_info in templates:
+                tpl = tpl_info.get("template", "")
+                tpl_path = self._resolve_template_path(tpl)
+                tpl_dir = os.path.dirname(tpl_path) or "."
+                loaded = image_engine.load_templates(tpl_dir)
+                target_name = os.path.splitext(os.path.basename(tpl_path))[0]
+                target = [t for t in loaded if t[0] == target_name]
+                if target:
+                    all_loaded.append((tpl_info, target))
+            
+            # 截图并匹配
+            img = screencap_to_memory(self.device_id)
+            if img is None:
+                self._log("⚠️ 截图失败，跳过多图匹配。")
+                return
+            
+            if 'on_screenshot' in self.callbacks:
+                self.callbacks['on_screenshot'](img)
+            
+            for tpl_info, target_tmpl in all_loaded:
+                threshold = tpl_info.get("threshold", 0.9)
+                matches = image_engine.match_all(img, target_tmpl, threshold)
+                if matches:
+                    name, cx, cy, score = matches[0]
+                    # 从 meta.json 读取偏移量
+                    tpl_fname = os.path.basename(tpl_info.get('template', ''))
+                    meta = template_meta.get(self.model.pictures_dir, tpl_fname)
+                    ox = meta.get("offset_x", 0)
+                    oy = meta.get("offset_y", 0)
+                    final_x, final_y = cx + ox, cy + oy
+                    self._log(f"✅ 多图匹配命中 [{tpl_info.get('template','')}] "
+                              f"分数={score:.2f}, 点击 ({final_x},{final_y})")
+                    tap(self.device_id, final_x, final_y)
+                    if 'on_match' in self.callbacks:
+                        self.callbacks['on_match'](matches)
+                    return
+            
+            self._log("🔍 多图匹配: 无命中")
+
         else:
             self._log(f"⚠️ 未知指令类型: [{action_type}]，已跳过。")
 
@@ -274,16 +325,44 @@ class ScriptEngine:
                     continue
                 
                 tpl_path = self._resolve_template_path(tpl)
+                # 从 meta.json 读取偏移量
+                meta = template_meta.get(self.model.pictures_dir, tpl_name)
                 current_rule = {
                     "template_path": tpl_path,
                     "template_name": tpl_name,
                     "threshold": action.params.get("threshold", 0.9),
-                    "offset_x": action.params.get("offset_x", 0),
-                    "offset_y": action.params.get("offset_y", 0),
-                    "sub_actions": [],  # 后续绑定的子动作
-                    "handled": False,   # 本轮是否已处理
+                    "offset_x": meta.get("offset_x", 0),
+                    "offset_y": meta.get("offset_y", 0),
+                    "sub_actions": [],
+                    "handled": False,
                 }
                 rules.append(current_rule)
+            
+            elif action.type == "multi_match":
+                # multi_match 节点：将 templates 数组展开为多条独立的 watch rule
+                templates = action.params.get("templates", [])
+                for tpl_info in templates:
+                    tpl = tpl_info.get("template", "")
+                    tpl_name = os.path.basename(tpl)
+                    # 白名单过滤
+                    if enabled_templates is not None and tpl_name not in enabled_templates:
+                        continue
+                    
+                    tpl_path = self._resolve_template_path(tpl)
+                    # 从 meta.json 读取偏移量
+                    meta = template_meta.get(self.model.pictures_dir, tpl_name)
+                    current_rule = {
+                        "template_path": tpl_path,
+                        "template_name": tpl_name,
+                        "threshold": tpl_info.get("threshold", 0.9),
+                        "offset_x": meta.get("offset_x", 0),
+                        "offset_y": meta.get("offset_y", 0),
+                        "sub_actions": [],
+                        "handled": False,
+                        "_from_multi_match": True,
+                    }
+                    rules.append(current_rule)
+            
             elif current_rule is not None and action.type in ("tap", "sleep", "swipe"):
                 # 归入当前 rule 的子动作
                 current_rule["sub_actions"].append(action)

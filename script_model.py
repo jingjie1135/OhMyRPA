@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import uuid
 from typing import List, Dict, Any
 
@@ -151,14 +152,74 @@ class ScriptModel:
             model.actions = [ActionNode.from_dict(a) for a in data["actions"]]
         return model
         
+    def internalize_image(self, external_path: str) -> str:
+        """
+        将外部图片复制到项目 Pictures/ 目录，返回文件名（相对路径）。
+        如果文件已在项目内则直接返回文件名，不重复复制。
+        
+        Args:
+            external_path: 外部图片的绝对路径
+        Returns:
+            str: 复制后的文件名（如 "进入副本@540x960.png"）
+        """
+        if not self.project_dir:
+            raise ValueError("未设置项目目录，无法内化图片")
+        
+        # 标准化路径以便比较
+        abs_path = os.path.abspath(external_path)
+        pics_abs = os.path.abspath(self.pictures_dir)
+        
+        # 已在项目 Pictures/ 下 → 直接返回文件名
+        if abs_path.startswith(pics_abs + os.sep):
+            return os.path.basename(abs_path)
+        
+        # 仅文件名（无目录） → 可能已经是相对路径引用，检查文件是否存在
+        filename = os.path.basename(abs_path)
+        dest = os.path.join(self.pictures_dir, filename)
+        
+        if not os.path.exists(abs_path):
+            # 源文件不存在，返回原文件名（可能已经内化）
+            return filename
+        
+        # 复制到项目 Pictures/ 目录（同名跳过，除非内容不同）
+        os.makedirs(self.pictures_dir, exist_ok=True)
+        if not os.path.exists(dest):
+            shutil.copy2(abs_path, dest)
+        
+        return filename
+    
+    def internalize_all_images(self):
+        """
+        遍历所有 actions，将 find_and_tap / wait_image 中的外部绝对路径
+        自动内化为项目内相对路径（仅文件名）。
+        """
+        if not self.project_dir:
+            return
+        
+        for action in self.actions:
+            if action.type in ("find_and_tap", "wait_image"):
+                template = action.params.get("template", "")
+                if not template:
+                    continue
+                # 检测是否为外部绝对路径
+                if os.path.isabs(template):
+                    pics_abs = os.path.abspath(self.pictures_dir)
+                    abs_template = os.path.abspath(template)
+                    # 已在项目内的绝对路径也需简化为文件名
+                    if abs_template.startswith(pics_abs + os.sep) or not abs_template.startswith(os.path.abspath(self.project_dir)):
+                        new_name = self.internalize_image(template)
+                        action.params["template"] = new_name
+
     def save(self):
-        """保存到当前项目目录，自动创建所需子目录结构。"""
+        """保存到当前项目目录，自动创建所需子目录结构并内化外部图片引用。"""
         if not self.project_dir:
             raise ValueError("未设置项目目录，请先设置 project_dir")
         # 确保项目目录及子目录存在
         os.makedirs(self.project_dir, exist_ok=True)
         os.makedirs(self.temp_dir, exist_ok=True)
         os.makedirs(self.pictures_dir, exist_ok=True)
+        # 保存前自动内化外部图片路径
+        self.internalize_all_images()
         with open(self.filepath, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=4)
             
@@ -190,3 +251,37 @@ class ScriptModel:
             if os.path.isdir(project_path) and os.path.exists(script_file):
                 projects.append(entry)
         return projects
+    
+    @classmethod
+    def import_project(cls, source_dir: str, target_name: str = None) -> 'ScriptModel':
+        """
+        导入脚本项目：整体复制到 Scripts/ 目录，并内化所有外部图片引用。
+        
+        Args:
+            source_dir: 源项目目录的绝对路径
+            target_name: 目标项目名称，默认使用源目录名
+        Returns:
+            ScriptModel: 导入后的脚本模型
+        """
+        if target_name is None:
+            target_name = os.path.basename(source_dir.rstrip(os.sep))
+        
+        target_dir = os.path.join(cls.SCRIPTS_ROOT, target_name)
+        
+        # 防止覆盖已有项目：自动追加编号
+        if os.path.exists(target_dir):
+            n = 1
+            while os.path.exists(f"{target_dir}_{n}"):
+                n += 1
+            target_dir = f"{target_dir}_{n}"
+            target_name = os.path.basename(target_dir)
+        
+        # 整体复制项目目录
+        shutil.copytree(source_dir, target_dir)
+        
+        # 加载并内化所有外部图片引用
+        model = cls.load_from_project(target_dir)
+        model.internalize_all_images()
+        model.save()
+        
+        return model
