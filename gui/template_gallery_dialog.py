@@ -183,8 +183,13 @@ class TemplateGalleryWidget(QWidget):
         layout.setSpacing(6)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # ===== 顶部：返回按钮 + 标题 =====
+        # ===== 顶部：标题 + 返回按钮 =====
         top_bar = QHBoxLayout()
+
+        title = QLabel("📂 模板图库管理")
+        title.setFont(create_font(10, bold=True))
+        top_bar.addWidget(title)
+        top_bar.addStretch()
 
         back_btn = QPushButton("← 返回")
         back_btn.setFont(create_font())
@@ -192,11 +197,6 @@ class TemplateGalleryWidget(QWidget):
         back_btn.setToolTip("返回属性面板")
         back_btn.clicked.connect(self._on_close)
         top_bar.addWidget(back_btn)
-
-        title = QLabel("📂 模板图库管理")
-        title.setFont(create_font(10, bold=True))
-        top_bar.addWidget(title)
-        top_bar.addStretch()
 
         layout.addLayout(top_bar)
 

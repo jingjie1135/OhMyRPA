@@ -269,6 +269,7 @@ class ScriptEngine:
             if 'on_screenshot' in self.callbacks:
                 self.callbacks['on_screenshot'](img)
             
+            hit_count = 0
             for tpl_info, target_tmpl in all_loaded:
                 threshold = tpl_info.get("threshold", 0.9)
                 matches = image_engine.match_all(img, target_tmpl, threshold)
@@ -283,11 +284,20 @@ class ScriptEngine:
                     self._log(f"✅ 多图匹配命中 [{tpl_info.get('template','')}] "
                               f"分数={score:.2f}, 点击 ({final_x},{final_y})")
                     tap(self.device_id, final_x, final_y)
+                    hit_count += 1
                     if 'on_match' in self.callbacks:
                         self.callbacks['on_match'](matches)
-                    return
+                    
+                    # 每次命中后执行子动作
+                    for sub_dict in p.get("sub_actions", []):
+                        self._check_interrupt_and_pause()
+                        sub_node = ActionNode.from_dict(sub_dict)
+                        self._execute_action(sub_node)
             
-            self._log("🔍 多图匹配: 无命中")
+            if hit_count == 0:
+                self._log("🔍 多图匹配: 无命中")
+            else:
+                self._log(f"🔍 多图匹配: 共命中 {hit_count} 个模板")
 
         else:
             self._log(f"⚠️ 未知指令类型: [{action_type}]，已跳过。")
@@ -351,13 +361,18 @@ class ScriptEngine:
                     tpl_path = self._resolve_template_path(tpl)
                     # 从 meta.json 读取偏移量
                     meta = template_meta.get(self.model.pictures_dir, tpl_name)
+                    # 将嵌入的 sub_actions 转为 ActionNode 对象
+                    embedded_subs = [
+                        ActionNode.from_dict(sd)
+                        for sd in action.params.get("sub_actions", [])
+                    ]
                     current_rule = {
                         "template_path": tpl_path,
                         "template_name": tpl_name,
                         "threshold": tpl_info.get("threshold", 0.9),
                         "offset_x": meta.get("offset_x", 0),
                         "offset_y": meta.get("offset_y", 0),
-                        "sub_actions": [],
+                        "sub_actions": embedded_subs,
                         "handled": False,
                         "_from_multi_match": True,
                     }

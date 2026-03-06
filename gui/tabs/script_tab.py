@@ -169,19 +169,20 @@ class ScriptTab(QWidget):
 
     def _populate_toolbox(self):
         """填充左侧的基础工具指令到树形控件"""
-        base_cat = QTreeWidgetItem(self.toolbox_tree, ["基础动作"])
-        QTreeWidgetItem(base_cat, ["🖱 点击坐标"]).setData(0, Qt.ItemDataRole.UserRole, "tap")
-        QTreeWidgetItem(base_cat, ["👆 滑动操作"]).setData(0, Qt.ItemDataRole.UserRole, "swipe")
-        QTreeWidgetItem(base_cat, ["⏱ 延时等待"]).setData(0, Qt.ItemDataRole.UserRole, "sleep")
-        
-        image_cat = QTreeWidgetItem(self.toolbox_tree, ["图像识别"])
-        QTreeWidgetItem(image_cat, ["🔍 找图并点击"]).setData(0, Qt.ItemDataRole.UserRole, "find_and_tap")
-        QTreeWidgetItem(image_cat, ["🔍 等待图片出现"]).setData(0, Qt.ItemDataRole.UserRole, "wait_image")
-        
-        flow_cat = QTreeWidgetItem(self.toolbox_tree, ["流程控制"])
-        QTreeWidgetItem(flow_cat, ["🔄 循环开始"]).setData(0, Qt.ItemDataRole.UserRole, "loop_start")
-        QTreeWidgetItem(flow_cat, ["🔚 循环结束"]).setData(0, Qt.ItemDataRole.UserRole, "loop_end")
-        
+        from gui.action_props import ACTION_REGISTRY
+        # 按分类分组（脚本 Tab 不需要多图点击）
+        categories = {}
+        for type_key, (icon, display_name, category) in ACTION_REGISTRY.items():
+            if type_key == "multi_match":
+                continue
+            if category not in categories:
+                categories[category] = []
+            categories[category].append((type_key, icon, display_name))
+        for cat_name, items in categories.items():
+            cat = QTreeWidgetItem(self.toolbox_tree, [cat_name])
+            for type_key, icon, display_name in items:
+                QTreeWidgetItem(cat, [f"{icon} {display_name}"]).setData(
+                    0, Qt.ItemDataRole.UserRole, type_key)
         self.toolbox_tree.expandAll()
 
     def _on_toolbox_double_clicked(self, item: QTreeWidgetItem, column: int):
@@ -194,17 +195,13 @@ class ScriptTab(QWidget):
         from script_model import ActionNode
         
         # 常见初始参数模板
-        default_params = {}
-        if action_type == "tap":
-            default_params = {"x": 0, "y": 0}
-        elif action_type == "sleep":
-            default_params = {"seconds": 1.0}
-        elif action_type == "swipe":
-            default_params = {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "duration": 300}
-        elif action_type == "find_and_tap":
-            default_params = {"template": "", "threshold": 0.9, "timeout": 3.0}
-        elif action_type == "wait_image":
-            default_params = {"template": "", "timeout": 30.0, "action_on_fail": "abort"}
+        default_params = {
+            "tap": {"x": 0, "y": 0},
+            "sleep": {"seconds": 1.0},
+            "swipe": {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "duration": 300},
+            "find_and_tap": {"template": "", "threshold": 0.9, "timeout": 3.0},
+            "wait_image": {"template": "", "timeout": 30.0, "action_on_fail": "abort"},
+        }.get(action_type, {})
 
         node = ActionNode(action_type=action_type, params=default_params)
         self.current_model.add_action(node)
@@ -598,37 +595,13 @@ class ScriptTab(QWidget):
 
     def _refresh_action_list_text(self):
         """遍历动作列表，根据内部参数更新显示的文本"""
+        from gui.action_props import format_action_text
         for i in range(self.action_list.count()):
             item = self.action_list.item(i)
             node_id = item.data(Qt.ItemDataRole.UserRole)
             node = next((n for n in self.current_model.actions if n.id == node_id), None)
             if not node: continue
-            
-            # 显示文本生成规则
-            text = "未知指令"
-            if node.type == "tap":
-                text = f"🖱 点击坐标 [X:{node.params.get('x',0)}, Y:{node.params.get('y',0)}]"
-            elif node.type == "sleep":
-                text = f"⏱ 等待 [{node.params.get('seconds',0.0)}] 秒"
-            elif node.type == "find_and_tap":
-                _raw = os.path.basename(node.params.get('template', ''))
-                target = _raw.split('@')[0].rsplit('.', 1)[0] if _raw else '未选择'
-                text = f"🔍 寻找图片并点击 [{target}]"
-            elif node.type == "wait_image":
-                _raw = os.path.basename(node.params.get('template', ''))
-                target = _raw.split('@')[0].rsplit('.', 1)[0] if _raw else '未选择'
-                timeout_sec = node.params.get('timeout', 0)
-                text = f"🔍 等待图片出现 [{target}] 超时{timeout_sec}s"
-            elif node.type == "swipe":
-                x1, y1 = node.params.get('x1', 0), node.params.get('y1', 0)
-                x2, y2 = node.params.get('x2', 0), node.params.get('y2', 0)
-                text = f"👆 滑动 ({x1},{y1})→({x2},{y2})"
-            elif node.type == "loop_start":
-                text = f"🔄 循环开始"
-            elif node.type == "loop_end":
-                text = f"🔚 循环结束"
-                
-            item.setText(f"{i+1}. {text}")
+            item.setText(f"{i+1}. {format_action_text(node)}")
 
     def _show_script_config(self):
         """在右侧属性面板展示脚本全局配置"""
@@ -709,261 +682,42 @@ class ScriptTab(QWidget):
         self.props_stack.setCurrentIndex(1)
 
     def _create_props_widget(self, node) -> QWidget:
-        """根据 ActionNode 类型动态生成参数配置面板"""
-        from PyQt6.QtWidgets import QFormLayout, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox
+        """根据 ActionNode 类型动态生成参数配置面板（统一调用 action_props）"""
+        from PyQt6.QtWidgets import QFormLayout, QLineEdit
+        from gui.action_props import build_action_props, append_comment_row
 
         widget = QWidget()
         layout = QFormLayout(widget)
         
-        # 内部更新回调，当 UI 控件值改变时更新数据模型并刷新列表名称
         def update_param(key, value):
             node.params[key] = value
             self._refresh_action_list_text()
 
-        if node.type == "tap":
-            spin_x = QSpinBox()
-            spin_x.setRange(0, 4000)
-            spin_x.setValue(node.params.get("x", 0))
-            spin_x.valueChanged.connect(lambda v: update_param("x", v))
-            
-            spin_y = QSpinBox()
-            spin_y.setRange(0, 4000)
-            spin_y.setValue(node.params.get("y", 0))
-            spin_y.valueChanged.connect(lambda v: update_param("y", v))
-            
-            layout.addRow("点击 X 坐标:", spin_x)
-            layout.addRow("点击 Y 坐标:", spin_y)
-            
-            if "snapshot" in node.params:
-                up_btn = QPushButton("✨ 升级为【找图并点击】")
-                up_btn.setStyleSheet("color: white; background-color: #f39c12; font-weight: bold;")
-                up_btn.clicked.connect(lambda: self._upgrade_to_find_and_tap(node))
-                layout.addRow(up_btn)
-            
-            # 测试按钮：立即执行一次点击
-            test_btn = QPushButton("🧪 测试点击")
-            test_btn.setToolTip("在当前设备上执行一次点击")
-            def _test_tap():
-                import threading
-                from adb_utils import tap as adb_tap
-                main_win = self.window()
-                device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
-                if device_id:
-                    threading.Thread(target=adb_tap, args=(device_id, node.params.get('x',0), node.params.get('y',0)), daemon=True).start()
-                    if hasattr(main_win, '_append_log'):
-                        main_win._append_log(f"🧪 测试点击 ({node.params.get('x',0)}, {node.params.get('y',0)})")
-            test_btn.clicked.connect(_test_tap)
-            layout.addRow(test_btn)
-            
-        elif node.type == "sleep":
-            spin_sec = QDoubleSpinBox()
-            spin_sec.setRange(0.1, 3600.0)
-            spin_sec.setSuffix(" 秒")
-            spin_sec.setValue(node.params.get("seconds", 1.0))
-            spin_sec.valueChanged.connect(lambda v: update_param("seconds", v))
-            
-            layout.addRow("等待时长:", spin_sec)
-            
-        elif node.type == "swipe":
-            spin_x1 = QSpinBox(); spin_x1.setRange(0, 4000)
-            spin_x1.setValue(node.params.get("x1", 0))
-            spin_x1.valueChanged.connect(lambda v: update_param("x1", v))
-            spin_y1 = QSpinBox(); spin_y1.setRange(0, 4000)
-            spin_y1.setValue(node.params.get("y1", 0))
-            spin_y1.valueChanged.connect(lambda v: update_param("y1", v))
-            spin_x2 = QSpinBox(); spin_x2.setRange(0, 4000)
-            spin_x2.setValue(node.params.get("x2", 0))
-            spin_x2.valueChanged.connect(lambda v: update_param("x2", v))
-            spin_y2 = QSpinBox(); spin_y2.setRange(0, 4000)
-            spin_y2.setValue(node.params.get("y2", 0))
-            spin_y2.valueChanged.connect(lambda v: update_param("y2", v))
-            spin_dur = QSpinBox(); spin_dur.setRange(50, 5000)
-            spin_dur.setSuffix(" ms")
-            spin_dur.setValue(node.params.get("duration", 300))
-            spin_dur.valueChanged.connect(lambda v: update_param("duration", v))
-            
-            layout.addRow("起点 X:", spin_x1)
-            layout.addRow("起点 Y:", spin_y1)
-            layout.addRow("终点 X:", spin_x2)
-            layout.addRow("终点 Y:", spin_y2)
-            layout.addRow("滑动时长:", spin_dur)
-
-        elif node.type == "find_and_tap":
-            import template_meta
-            
-            # 模板路径显示
-            _raw_tpl = node.params.get("template", "")
-            edit_template = QLineEdit(_raw_tpl)
-            
-            # 偏移量编辑（先创建控件，供模板变更回调引用）
-            spin_ox = QSpinBox()
-            spin_ox.setRange(-2000, 2000)
-            spin_ox.setValue(node.params.get("offset_x", 0))
-            spin_oy = QSpinBox()
-            spin_oy.setRange(-2000, 2000)
-            spin_oy.setValue(node.params.get("offset_y", 0))
-            
-            # 模板路径变更时自动从 meta.json 加载偏移量
-            def _on_template_changed(text):
-                update_param("template", text)
-                tpl_name = os.path.basename(text)
-                if tpl_name:
-                    meta = template_meta.get(self.current_model.pictures_dir, tpl_name)
-                    if meta:
-                        # 用 meta.json 的值更新 spinbox（不触发写回）
-                        spin_ox.blockSignals(True)
-                        spin_oy.blockSignals(True)
-                        spin_ox.setValue(meta.get("offset_x", 0))
-                        spin_oy.setValue(meta.get("offset_y", 0))
-                        update_param("offset_x", meta.get("offset_x", 0))
-                        update_param("offset_y", meta.get("offset_y", 0))
-                        spin_ox.blockSignals(False)
-                        spin_oy.blockSignals(False)
-            edit_template.textChanged.connect(_on_template_changed)
-            
-            # 偏移量变更时同步写回 meta.json
-            def _on_offset_changed():
-                update_param("offset_x", spin_ox.value())
-                update_param("offset_y", spin_oy.value())
-                tpl_name = os.path.basename(node.params.get("template", ""))
-                if tpl_name:
-                    template_meta.set_meta(
-                        self.current_model.pictures_dir, tpl_name,
-                        offset_x=spin_ox.value(), offset_y=spin_oy.value()
-                    )
-            spin_ox.valueChanged.connect(lambda v: _on_offset_changed())
-            spin_oy.valueChanged.connect(lambda v: _on_offset_changed())
-            
-            # 浏览按钮
-            browse_btn = QPushButton("📂 浏览")
-            def _browse_template(et=edit_template):
-                from PyQt6.QtWidgets import QFileDialog
-                start_dir = self.current_model.pictures_dir
-                if not os.path.isdir(start_dir):
-                    from config import TARGETS_DIR
-                    start_dir = TARGETS_DIR
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "选择模板图片", start_dir, "图片文件 (*.png *.jpg *.bmp)"
-                )
-                if path:
-                    et.setText(path)  # 触发 _on_template_changed 自动加载 meta
-            browse_btn.clicked.connect(lambda _checked=False, et=edit_template: _browse_template(et))
-            
-            spin_thresh = QDoubleSpinBox()
-            spin_thresh.setRange(0.5, 1.0)
-            spin_thresh.setSingleStep(0.05)
-            spin_thresh.setValue(node.params.get("threshold", 0.9))
-            spin_thresh.valueChanged.connect(lambda v: update_param("threshold", v))
-            
-            spin_timeout = QDoubleSpinBox()
-            spin_timeout.setRange(0.0, 300.0)
-            spin_timeout.setSuffix(" 秒")
-            spin_timeout.setValue(node.params.get("timeout", 3.0))
-            spin_timeout.valueChanged.connect(lambda v: update_param("timeout", v))
-            
-            # 布局
-            tpl_row = QHBoxLayout()
-            tpl_row.addWidget(edit_template)
-            tpl_row.addWidget(browse_btn)
-            layout.addRow("目标图片:", tpl_row)
-            layout.addRow("相似度阈值:", spin_thresh)
-            layout.addRow("寻找超时:", spin_timeout)
-            layout.addRow("点击偏移 X:", spin_ox)
-            layout.addRow("点击偏移 Y:", spin_oy)
-            
-            # 测试按钮：执行一次找图并点击
-            test_btn = QPushButton("🧪 测试找图点击")
-            test_btn.setToolTip("截图一次并尝试匹配点击")
-            def _test_find_and_tap():
-                import threading
-                main_win = self.window()
-                device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
-                if not device_id:
-                    return
-                def _do_test():
-                    from adb_utils import screencap_to_memory, tap as adb_tap
-                    from PyQt6.QtCore import QMetaObject, Qt as _Qt, Q_ARG
-                    import image_engine
-                    
-                    # 线程安全的日志输出
-                    def _safe_log(msg):
-                        from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(0, lambda: main_win._append_log(msg) if hasattr(main_win, '_append_log') else None)
-                    
-                    tpl = node.params.get('template', '')
-                    if not tpl:
-                        return
-                    # 解析模板路径
-                    tpl_path = tpl
-                    if not os.path.exists(tpl_path):
-                        tpl_path = os.path.join(self.current_model.pictures_dir, tpl)
-                    tpl_dir = os.path.dirname(tpl_path) or '.'
-                    loaded = image_engine.load_templates(tpl_dir)
-                    target_name = os.path.splitext(os.path.basename(tpl_path))[0]
-                    target = [t for t in loaded if t[0] == target_name]
-                    if not target:
-                        _safe_log(f"🧪 测试失败：未找到模板 [{tpl}]")
-                        return
-                    img = screencap_to_memory(device_id)
-                    if img is None:
-                        _safe_log("🧪 测试失败：截图失败")
-                        return
-                    th = node.params.get('threshold', 0.9)
-                    matches = image_engine.match_all(img, target, th)
-                    if matches:
-                        name, cx, cy, score = matches[0]
-                        ox = node.params.get('offset_x', 0)
-                        oy = node.params.get('offset_y', 0)
-                        final_x, final_y = cx + ox, cy + oy
-                        adb_tap(device_id, final_x, final_y)
-                        _safe_log(f"🧪 测试成功：匹配 {score:.2f}，点击 ({final_x}, {final_y})")
-                    else:
-                        _safe_log("🧪 测试失败：未匹配到图片")
-                threading.Thread(target=_do_test, daemon=True).start()
-            test_btn.clicked.connect(_test_find_and_tap)
-            layout.addRow(test_btn)
-            
-        elif node.type == "wait_image":
-            edit_template = QLineEdit(node.params.get("template", ""))
-            edit_template.textChanged.connect(lambda text: update_param("template", text))
-            
-            # 浏览按钮
-            browse_btn2 = QPushButton("📂 浏览")
-            def _browse_wait_tpl(et=edit_template):
-                from PyQt6.QtWidgets import QFileDialog
-                start_dir = self.current_model.pictures_dir
-                if not os.path.isdir(start_dir):
-                    from config import TARGETS_DIR
-                    start_dir = TARGETS_DIR
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "选择模板图片", start_dir, "图片文件 (*.png *.jpg *.bmp)"
-                )
-                if path:
-                    et.setText(path)
-            browse_btn2.clicked.connect(lambda _checked=False, et=edit_template: _browse_wait_tpl(et))
-            
-            spin_timeout = QDoubleSpinBox()
-            spin_timeout.setRange(0.0, 3600.0)
-            spin_timeout.setSuffix(" 秒")
-            spin_timeout.setValue(node.params.get("timeout", 30.0))
-            spin_timeout.valueChanged.connect(lambda v: update_param("timeout", v))
-            
-            combo_fail = QComboBox()
-            combo_fail.addItems(["abort", "continue"])
-            combo_fail.setCurrentText(node.params.get("action_on_fail", "abort"))
-            combo_fail.currentTextChanged.connect(lambda text: update_param("action_on_fail", text))
-            
-            tpl_row2 = QHBoxLayout()
-            tpl_row2.addWidget(edit_template)
-            tpl_row2.addWidget(browse_btn2)
-            layout.addRow("目标图片:", tpl_row2)
-            layout.addRow("超时判断时长:", spin_timeout)
-            layout.addRow("超时后操作:", combo_fail)
-            
-        else:
+        # 构建上下文
+        main_win = self.window()
+        ctx = {
+            "main_win": main_win,
+            "pictures_dir": self.current_model.pictures_dir if self.current_model else "",
+            "internalize_fn": self.current_model.internalize_image if self.current_model else None,
+        }
+        
+        # 统一分派构建
+        built = build_action_props(layout, node, update_param, ctx)
+        
+        # script_tab 特有：点击坐标升级为找图点击
+        if node.type == "tap" and "snapshot" in node.params:
+            up_btn = QPushButton("✨ 升级为【找图点击】")
+            up_btn.setStyleSheet("color: white; background-color: #f39c12; font-weight: bold;")
+            up_btn.clicked.connect(lambda: self._upgrade_to_find_and_tap(node))
+            layout.addRow(up_btn)
+        
+        if not built:
             layout.addRow(QLabel("暂无参数属性"))
 
-        # 下方可追加全局操作，比如删除该节点
+        # 通用备注行
+        append_comment_row(layout, node)
+
+        # 删除按钮
         del_btn = QPushButton("🗑 删除此指令")
         del_btn.setObjectName("dangerBtn")
         del_btn.clicked.connect(lambda: self._delete_current_action(node.id))

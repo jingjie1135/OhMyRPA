@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from script_model import ScriptModel, ActionNode
-from gui.constants import create_font
+from gui.constants import create_font, COLOR_DANGER
 
 
 class LoopScriptTab(QWidget):
@@ -171,20 +171,19 @@ class LoopScriptTab(QWidget):
     
     def _populate_toolbox(self):
         """填充左侧指令工具箱"""
-        base_cat = QTreeWidgetItem(self.toolbox_tree, ["基础动作"])
-        QTreeWidgetItem(base_cat, ["🖱 点击坐标"]).setData(
-            0, Qt.ItemDataRole.UserRole, "tap")
-        QTreeWidgetItem(base_cat, ["👆 滑动操作"]).setData(
-            0, Qt.ItemDataRole.UserRole, "swipe")
-        QTreeWidgetItem(base_cat, ["⏱ 延时等待"]).setData(
-            0, Qt.ItemDataRole.UserRole, "sleep")
-        
-        image_cat = QTreeWidgetItem(self.toolbox_tree, ["图像识别"])
-        QTreeWidgetItem(image_cat, ["🔍 找图并点击"]).setData(
-            0, Qt.ItemDataRole.UserRole, "find_and_tap")
-        QTreeWidgetItem(image_cat, ["🎯 多图匹配"]).setData(
-            0, Qt.ItemDataRole.UserRole, "multi_match")
-        
+        from gui.action_props import ACTION_REGISTRY
+        categories = {}
+        for type_key, (icon, display_name, category) in ACTION_REGISTRY.items():
+            if category == "流程控制":
+                continue
+            if category not in categories:
+                categories[category] = []
+            categories[category].append((type_key, icon, display_name))
+        for cat_name, items in categories.items():
+            cat = QTreeWidgetItem(self.toolbox_tree, [cat_name])
+            for type_key, icon, display_name in items:
+                QTreeWidgetItem(cat, [f"{icon} {display_name}"]).setData(
+                    0, Qt.ItemDataRole.UserRole, type_key)
         self.toolbox_tree.expandAll()
     
     def _on_toolbox_double_clicked(self, item: QTreeWidgetItem, column: int):
@@ -194,17 +193,14 @@ class LoopScriptTab(QWidget):
             return
         
         # 默认参数模板
-        default_params = {}
-        if action_type == "tap":
-            default_params = {"x": 0, "y": 0}
-        elif action_type == "sleep":
-            default_params = {"seconds": 1.0}
-        elif action_type == "swipe":
-            default_params = {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "duration": 300}
-        elif action_type == "find_and_tap":
-            default_params = {"template": "", "threshold": 0.9, "timeout": 3.0}
-        elif action_type == "multi_match":
-            default_params = {"templates": []}
+        default_params = {
+            "tap": {"x": 0, "y": 0},
+            "sleep": {"seconds": 1.0},
+            "swipe": {"x1": 0, "y1": 0, "x2": 0, "y2": 0, "duration": 300},
+            "find_and_tap": {"template": "", "threshold": 0.9, "timeout": 3.0},
+            "multi_match": {"templates": [], "sub_actions": []},
+            "wait_image": {"template": "", "timeout": 30.0, "action_on_fail": "abort"},
+        }.get(action_type, {})
         
         node = ActionNode(action_type=action_type, params=default_params)
         self.current_model.add_action(node)
@@ -338,6 +334,7 @@ class LoopScriptTab(QWidget):
     
     def _refresh_action_list_text(self):
         """刷新步骤列表的显示文本"""
+        from gui.action_props import format_action_text
         if not self.current_model:
             return
         for i in range(self.action_list.count()):
@@ -346,25 +343,7 @@ class LoopScriptTab(QWidget):
             node = next((n for n in self.current_model.actions if n.id == node_id), None)
             if not node:
                 continue
-            
-            text = "未知指令"
-            if node.type == "tap":
-                text = f"🖱 点击 ({node.params.get('x',0)}, {node.params.get('y',0)})"
-            elif node.type == "sleep":
-                text = f"⏱ 等待 {node.params.get('seconds',0.0)}s"
-            elif node.type == "find_and_tap":
-                _raw = os.path.basename(node.params.get('template', ''))
-                target = _raw.split('@')[0].rsplit('.', 1)[0] if _raw else '未选择'
-                text = f"🔍 [监视] {target}"
-            elif node.type == "swipe":
-                x1, y1 = node.params.get('x1', 0), node.params.get('y1', 0)
-                x2, y2 = node.params.get('x2', 0), node.params.get('y2', 0)
-                text = f"👆 滑动 ({x1},{y1})→({x2},{y2})"
-            elif node.type == "multi_match":
-                tpl_count = len(node.params.get('templates', []))
-                text = f"🎯 多图匹配 ({tpl_count} 个模板)"
-            
-            item.setText(f"{i+1}. {text}")
+            item.setText(f"{i+1}. {format_action_text(node)}")
     
     def _on_item_check_changed(self, item):
         """模板勾选状态改变时更新启用集合"""
@@ -522,7 +501,10 @@ class LoopScriptTab(QWidget):
         self._set_props_widget(widget)
     
     def _create_props_widget(self, node) -> QWidget:
-        """根据 ActionNode 类型动态生成参数面板"""
+        """根据 ActionNode 类型动态生成参数面板（统一调用 action_props）"""
+        from gui.action_props import build_action_props, append_comment_row
+        from PyQt6.QtWidgets import QFormLayout
+        
         widget = QWidget()
         layout = QFormLayout(widget)
         
@@ -530,143 +512,24 @@ class LoopScriptTab(QWidget):
             node.params[key] = value
             self._refresh_action_list_text()
         
-        if node.type == "tap":
-            spin_x = QSpinBox()
-            spin_x.setRange(0, 4000)
-            spin_x.setValue(node.params.get("x", 0))
-            spin_x.valueChanged.connect(lambda v: update_param("x", v))
-            
-            spin_y = QSpinBox()
-            spin_y.setRange(0, 4000)
-            spin_y.setValue(node.params.get("y", 0))
-            spin_y.valueChanged.connect(lambda v: update_param("y", v))
-            
-            layout.addRow("点击 X 坐标:", spin_x)
-            layout.addRow("点击 Y 坐标:", spin_y)
-            
-            # 备注
-            comment_edit = QLineEdit(node.comment)
-            comment_edit.setPlaceholderText("可选备注")
-            comment_edit.textChanged.connect(lambda v: setattr(node, 'comment', v))
-            layout.addRow("备注:", comment_edit)
-            
-        elif node.type == "sleep":
-            spin_sec = QDoubleSpinBox()
-            spin_sec.setRange(0.1, 3600.0)
-            spin_sec.setSuffix(" 秒")
-            spin_sec.setValue(node.params.get("seconds", 1.0))
-            spin_sec.valueChanged.connect(lambda v: update_param("seconds", v))
-            layout.addRow("等待时长:", spin_sec)
-            
-        elif node.type == "swipe":
-            for label, key, default in [
-                ("起点 X:", "x1", 0), ("起点 Y:", "y1", 0),
-                ("终点 X:", "x2", 0), ("终点 Y:", "y2", 0),
-            ]:
-                spin = QSpinBox()
-                spin.setRange(0, 4000)
-                spin.setValue(node.params.get(key, default))
-                spin.valueChanged.connect(lambda v, k=key: update_param(k, v))
-                layout.addRow(label, spin)
-            
-            spin_dur = QSpinBox()
-            spin_dur.setRange(50, 5000)
-            spin_dur.setSuffix(" ms")
-            spin_dur.setValue(node.params.get("duration", 300))
-            spin_dur.valueChanged.connect(lambda v: update_param("duration", v))
-            layout.addRow("滑动时长:", spin_dur)
-            
-        elif node.type == "find_and_tap":
-            # 模板路径
-            _raw_tpl = node.params.get("template", "")
-            edit_template = QLineEdit(_raw_tpl)
-            edit_template.setPlaceholderText("模板图片文件名")
-            
-            # 浏览按钮
-            browse_btn = QPushButton("📂 选择图片")
-            def _browse_template():
-                pics_dir = self.current_model.pictures_dir if self.current_model else ""
-                start_dir = pics_dir if os.path.isdir(pics_dir) else ""
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "选择模板图片", start_dir,
-                    "图片 (*.png *.jpg *.bmp)"
-                )
-                if path:
-                    # 自动内化到项目 Pictures/
-                    if self.current_model:
-                        filename = self.current_model.internalize_image(path)
-                    else:
-                        filename = os.path.basename(path)
-                    edit_template.setText(filename)
-                    update_param("template", filename)
-                    # 自动添加到启用集合
-                    self._enabled_templates.add(filename)
-                    # 同步偏移量从 meta.json
-                    self._sync_meta_offsets(node, filename)
-            
-            browse_btn.clicked.connect(_browse_template)
-            
-            layout.addRow("模板图片:", edit_template)
-            layout.addRow("", browse_btn)
-            edit_template.textChanged.connect(lambda v: update_param("template", v))
-            
-            # 阈值
-            spin_th = QDoubleSpinBox()
-            spin_th.setRange(0.1, 1.0)
-            spin_th.setSingleStep(0.05)
-            spin_th.setValue(node.params.get("threshold", 0.9))
-            spin_th.valueChanged.connect(lambda v: update_param("threshold", v))
-            layout.addRow("匹配阈值:", spin_th)
-            
-            # 偏移量
-            spin_ox = QSpinBox()
-            spin_ox.setRange(-2000, 2000)
-            spin_ox.setValue(node.params.get("offset_x", 0))
-            spin_ox.valueChanged.connect(lambda v: update_param("offset_x", v))
-            layout.addRow("偏移 X:", spin_ox)
-            
-            spin_oy = QSpinBox()
-            spin_oy.setRange(-2000, 2000)
-            spin_oy.setValue(node.params.get("offset_y", 0))
-            spin_oy.valueChanged.connect(lambda v: update_param("offset_y", v))
-            layout.addRow("偏移 Y:", spin_oy)
-            
-            # 模板预览
-            if _raw_tpl and self.current_model:
-                tpl_path = os.path.join(self.current_model.pictures_dir, _raw_tpl)
-                if os.path.exists(tpl_path):
-                    pixmap = QPixmap(tpl_path)
-                    if not pixmap.isNull():
-                        preview = QLabel()
-                        preview.setPixmap(pixmap.scaled(
-                            160, 160,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        ))
-                        layout.addRow("预览:", preview)
-            
-            # 备注
-            comment_edit = QLineEdit(node.comment)
-            comment_edit.setPlaceholderText("可选备注")
-            comment_edit.textChanged.connect(lambda v: setattr(node, 'comment', v))
-            layout.addRow("备注:", comment_edit)
+        # 构建上下文
+        main_win = self.window()
+        ctx = {
+            "main_win": main_win,
+            "pictures_dir": self.current_model.pictures_dir if self.current_model else "",
+            "internalize_fn": self.current_model.internalize_image if self.current_model else None,
+            "on_template_gallery": self._open_template_gallery,
+            "on_sub_action_add": self._add_sub_action,
+            "on_sub_action_del": self._del_sub_action,
+        }
         
-        elif node.type == "multi_match":
-            # ============ 多图匹配属性面板（精简版）============
-            templates = node.params.get('templates', [])
-            layout.addRow(QLabel(f"🎯 多图匹配（{len(templates)} 个模板）"))
-            
-            # 模板管理按钮（置顶，方便访问）
-            manage_btn = QPushButton("📂 模板管理")
-            manage_btn.setToolTip("打开图库界面管理模板")
-            manage_btn.clicked.connect(lambda: self._open_template_gallery(node))
-            layout.addRow(manage_btn)
-            
-            # 备注
-            comment_edit = QLineEdit(node.comment)
-            comment_edit.setPlaceholderText("可选备注")
-            comment_edit.textChanged.connect(lambda v: setattr(node, 'comment', v))
-            layout.addRow("备注:", comment_edit)
+        # 统一分派构建
+        built = build_action_props(layout, node, update_param, ctx)
+        if not built:
+            layout.addRow(QLabel("暂无参数属性"))
+        
+        # 通用备注行
+        append_comment_row(layout, node)
         
         return widget
     
@@ -717,24 +580,55 @@ class LoopScriptTab(QWidget):
         if sw:
             gallery.bind_screenshot_widget(sw)
         
+        # 记住当前选中的步骤行号
+        prev_row = self.action_list.currentRow()
+        
         # 添加为 page_stack 的新页面并切换
         idx = self._page_stack.addWidget(gallery)
         self._page_stack.setCurrentIndex(idx)
         
         # 返回时的处理
         def _on_gallery_closed(updated_templates):
-            node.params["templates"] = updated_templates
             # 切回编辑器页面
             self._page_stack.setCurrentIndex(0)
             self._page_stack.removeWidget(gallery)
             gallery.deleteLater()
-            # 刷新
+            
+            # 只在模板列表有变化时才保存
+            old_templates = node.params.get("templates", [])
+            changed = (len(updated_templates) != len(old_templates) or
+                       any(u.get("template") != o.get("template")
+                           for u, o in zip(updated_templates, old_templates)))
+            
+            if changed:
+                node.params["templates"] = updated_templates
+                self.current_model.save()
+                if hasattr(main_win, '_append_log'):
+                    main_win._append_log(f"📂 模板已更新: {len(updated_templates)} 个启用")
+            
+            # 刷新并恢复选中行
             self._reload_action_list_ui()
-            self.current_model.save()
-            if hasattr(main_win, '_append_log'):
-                main_win._append_log(f"📂 模板已更新: {len(updated_templates)} 个启用")
+            if prev_row >= 0 and prev_row < self.action_list.count():
+                self.action_list.setCurrentRow(prev_row)
         
         gallery.closed.connect(_on_gallery_closed)
+    
+    def _add_sub_action(self, node, sub_action_dict):
+        """向 multi_match 节点添加子动作并刷新面板"""
+        node.params.setdefault("sub_actions", []).append(sub_action_dict)
+        self.current_model.save()
+        # 刷新属性面板（重新选中当前行触发面板重建）
+        row = self.action_list.currentRow()
+        self._on_action_selected(row)
+    
+    def _del_sub_action(self, node, index):
+        """从 multi_match 节点删除指定子动作"""
+        sub_actions = node.params.get("sub_actions", [])
+        if 0 <= index < len(sub_actions):
+            sub_actions.pop(index)
+            self.current_model.save()
+            row = self.action_list.currentRow()
+            self._on_action_selected(row)
     
     def _on_convert(self):
         """流水线 → 多模板匹配转换（两步向导，创建新项目）"""
