@@ -12,7 +12,7 @@ from config import (
     REFRESH_BTN_POS, CLICK_DELAY, REFRESH_WAIT, LOOP_INTERVAL,
     MATCH_THRESHOLD
 )
-from adb_utils import screencap_to_memory, tap
+from device_adapter import DeviceAdapter, AdbAdapter
 from image_engine import load_templates, match_all
 from recovery import handle_exception
 
@@ -38,7 +38,7 @@ class RuntimeConfig:
 
 
 def run_shop_bot(device_id, runtime_config=None, pause_event=None,
-                 interrupt_check=None, callbacks=None):
+                 interrupt_check=None, callbacks=None, adapter=None):
     """
     单设备神秘商店自动扫货主循环。
 
@@ -63,6 +63,9 @@ def run_shop_bot(device_id, runtime_config=None, pause_event=None,
     # 使用默认配置（兼容无 GUI 的命令行模式）
     if runtime_config is None:
         runtime_config = RuntimeConfig()
+
+    # DeviceAdapter（DRY：统一设备交互入口）
+    _adapter = adapter or AdbAdapter(device_id)
 
     def log(msg):
         """统一日志输出：同时写入 logger 和 GUI 回调。"""
@@ -113,7 +116,7 @@ def run_shop_bot(device_id, runtime_config=None, pause_event=None,
                 break
 
             # ========== 第一步：极速截图 ==========
-            screen = screencap_to_memory(device_id)
+            screen = _adapter.get_frame()
             if screen is None:
                 log("截图失败，等待重试...")
                 time.sleep(1)
@@ -145,7 +148,7 @@ def run_shop_bot(device_id, runtime_config=None, pause_event=None,
 
                     log(f"发现目标 [{name}] (置信度:{score:.3f})，"
                         f"物品位置({cx},{cy}) → 偏移点击购买按钮({buy_x},{buy_y})")
-                    tap(device_id, buy_x, buy_y)
+                    _adapter.tap(buy_x, buy_y)
 
                     buy_count += 1
                     if callbacks and 'on_buy_count' in callbacks:
@@ -174,7 +177,7 @@ def run_shop_bot(device_id, runtime_config=None, pause_event=None,
                 rx = cfg.refresh_btn_x
                 ry = cfg.refresh_btn_y
                 log(f"点击刷新按钮 ({rx}, {ry})")
-                tap(device_id, rx, ry)
+                _adapter.tap(rx, ry)
                 time.sleep(cfg.refresh_wait)
 
             # 主循环间隔，防止 CPU 空转

@@ -669,6 +669,10 @@ class MainWindow(QMainWindow):
             )
             self._screencap_worker.log_signal.connect(self._append_log)
             self._screencap_worker.fps_signal.connect(self._on_fps_update)
+            # 连接 ScrcpyAdapter 就绪信号
+            self._screencap_worker.adapter_ready.connect(
+                self._on_adapter_ready
+            )
 
         self._screencap_worker.setup(device_id)
         return self._screencap_worker
@@ -686,6 +690,12 @@ class MainWindow(QMainWindow):
     def _on_screenshot_ready(self, q_image):
         """截图完成回调：更新预览区。"""
         self.screenshot_widget.update_screenshot(q_image)
+
+    @pyqtSlot(object)
+    def _on_adapter_ready(self, adapter):
+        """ScrcpyAdapter 就绪回调：注入到 ScreenshotWidget 供录制/操作使用。"""
+        self.screenshot_widget._scrcpy_adapter = adapter
+        self._append_log("ScrcpyAdapter 已就绪（支持低延迟触摸操作）")
 
     def _on_toggle_live_sync(self, checked):
         """实时同步开关：启动/停止持续截图。"""

@@ -3,7 +3,7 @@ import os
 import cv2
 
 from script_model import ScriptModel, ActionNode
-from adb_utils import screencap_to_memory, tap
+from device_adapter import DeviceAdapter, AdbAdapter
 import image_engine
 import template_meta
 
@@ -12,12 +12,15 @@ class ScriptEngine:
     通用脚本执行引擎，负责解析 ActionNode 流水线并调用底层接口。
     包揽阻塞状态控制、异常处理及弹窗守卫逻辑 (PopupGuard)。
     """
-    def __init__(self, model: ScriptModel, device_id: str, pause_event=None, interrupt_check=None, callbacks=None):
+    def __init__(self, model: ScriptModel, device_id: str, pause_event=None, interrupt_check=None, callbacks=None, adapter: DeviceAdapter = None):
         self.model = model
         self.device_id = device_id
         self.pause_event = pause_event
         self.interrupt_check = interrupt_check
         self.callbacks = callbacks or {}
+        
+        # DeviceAdapter（DRY：统一设备交互入口）
+        self._adapter = adapter or AdbAdapter(device_id)
         
         self.consecutive_fails = 0
         
@@ -41,7 +44,7 @@ class ScriptEngine:
             return False
             
         self._log("🛡 触发弹窗守卫：正在扫描可能的干扰弹窗...")
-        img = screencap_to_memory(self.device_id)
+        img = self._adapter.get_frame()
         if img is None: 
             return False
 
@@ -54,7 +57,7 @@ class ScriptEngine:
         if matches:
             name, cx, cy, score = matches[0]
             self._log(f"🛡 弹窗守卫命中目标 [{name}]，执行点击以关闭 ({cx}, {cy})")
-            tap(self.device_id, cx, cy)
+            self._adapter.tap(cx, cy)
             self.consecutive_fails = 0
             return True
                 
@@ -103,15 +106,14 @@ class ScriptEngine:
         if action_type == "tap":
             x, y = p.get('x', 0), p.get('y', 0)
             self._log(f"🎯 执行: 点击坐标 ({x}, {y})")
-            tap(self.device_id, x, y)
+            self._adapter.tap(x, y)
 
         elif action_type == "swipe":
             x1, y1 = p.get('x1', 0), p.get('y1', 0)
             x2, y2 = p.get('x2', 0), p.get('y2', 0)
             dur = p.get('duration', 300)
             self._log(f"👆 执行: 滑动 ({x1},{y1})→({x2},{y2}) {dur}ms")
-            from adb_utils import swipe as adb_swipe
-            adb_swipe(self.device_id, x1, y1, x2, y2, dur)
+            self._adapter.swipe(x1, y1, x2, y2, dur)
             
         elif action_type == "sleep":
             sec = p.get('seconds', 1.0)
@@ -154,7 +156,7 @@ class ScriptEngine:
             
             while time.time() - start_time < timeout:
                 self._check_interrupt_and_pause()
-                img = screencap_to_memory(self.device_id)
+                img = self._adapter.get_frame()
                 if img is None:
                     time.sleep(0.5)
                     continue
@@ -171,7 +173,7 @@ class ScriptEngine:
                     oy = p.get('offset_y', 0)
                     final_x, final_y = cx + ox, cy + oy
                     self._log(f"👉 找到图片 (匹配度:{score:.2f})，点击 ({final_x}, {final_y})")
-                    tap(self.device_id, final_x, final_y)
+                    self._adapter.tap(final_x, final_y)
                     found = True
                     self.consecutive_fails = 0
                     if 'on_match' in self.callbacks:
@@ -261,7 +263,7 @@ class ScriptEngine:
                     all_loaded.append((tpl_info, target))
             
             # 截图并匹配
-            img = screencap_to_memory(self.device_id)
+            img = self._adapter.get_frame()
             if img is None:
                 self._log("⚠️ 截图失败，跳过多图匹配。")
                 return
@@ -283,7 +285,7 @@ class ScriptEngine:
                     final_x, final_y = cx + ox, cy + oy
                     self._log(f"✅ 多图匹配命中 [{tpl_info.get('template','')}] "
                               f"分数={score:.2f}, 点击 ({final_x},{final_y})")
-                    tap(self.device_id, final_x, final_y)
+                    self._adapter.tap(final_x, final_y)
                     hit_count += 1
                     if 'on_match' in self.callbacks:
                         self.callbacks['on_match'](matches)
@@ -427,7 +429,7 @@ class ScriptEngine:
                     break
                 
                 # 截图
-                img = screencap_to_memory(self.device_id)
+                img = self._adapter.get_frame()
                 if img is None:
                     time.sleep(cfg.scan_interval)
                     continue
@@ -456,7 +458,7 @@ class ScriptEngine:
                         final_x, final_y = cx + ox, cy + oy
                         self._log(f"🔄[{loop_count}] 命中 [{rule['template_name']}] "
                                   f"匹配={score:.2f}, 点击 ({final_x},{final_y})")
-                        tap(self.device_id, final_x, final_y)
+                        self._adapter.tap(final_x, final_y)
                         any_matched = True
                         rule["handled"] = True
                         
@@ -473,7 +475,7 @@ class ScriptEngine:
                     if cfg.default_tap_x > 0 or cfg.default_tap_y > 0:
                         self._log(f"🔄[{loop_count}] 无匹配，默认点击 "
                                   f"({cfg.default_tap_x},{cfg.default_tap_y})")
-                        tap(self.device_id, cfg.default_tap_x, cfg.default_tap_y)
+                        self._adapter.tap(cfg.default_tap_x, cfg.default_tap_y)
                     else:
                         self._log(f"🔄[{loop_count}] 无匹配，无默认坐标，等待下一轮")
                     # 清除全部已处理标记，重新开始匹配

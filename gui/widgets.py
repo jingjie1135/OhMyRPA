@@ -49,6 +49,11 @@ class ScreenshotWidget(QWidget):
         # 可选：自定义保存目录，设置后 _save_region 直接保存到此目录，跳过图库目录选择
         self.custom_save_dir = None
 
+        # ScrcpyAdapter 引用（由 main_window 在 adapter_ready 时注入）
+        self._scrcpy_adapter = None
+        # 录制模式完整轨迹点列表：[(x, y, timestamp_ms), ...]
+        self._rec_path = []
+
     def update_screenshot(self, q_image):
         """
         更新截图内容。
@@ -294,7 +299,11 @@ class ScreenshotWidget(QWidget):
             self._rec_start = result
             self._rec_dragging = True
             self._rec_press_time = time.time()  # 记录按下时间
+            self._rec_path = [(result[0], result[1], int(time.time() * 1000))]  # 完整轨迹
             self._mouse_pos = result
+            # 通过 scrcpy 控制通道实时发送 touch_down
+            if self._scrcpy_adapter and self._scrcpy_adapter.supports_touch:
+                self._scrcpy_adapter.touch_down(result[0], result[1])
             self.update()
             return
 
@@ -315,6 +324,11 @@ class ScreenshotWidget(QWidget):
         # 录制模式：更新拖拽终点
         if getattr(self, '_recording_mode', False) and getattr(self, '_rec_dragging', False):
             self._rec_end = result
+            # 记录轨迹点
+            self._rec_path.append((result[0], result[1], int(time.time() * 1000)))
+            # 通过 scrcpy 控制通道实时发送 touch_move
+            if self._scrcpy_adapter and self._scrcpy_adapter.supports_touch:
+                self._scrcpy_adapter.touch_move(result[0], result[1])
             self.update()
 
         if self._is_dragging:
@@ -339,9 +353,12 @@ class ScreenshotWidget(QWidget):
             end = result if result else getattr(self, '_rec_end', self._rec_start)
             start = self._rec_start
             dist = ((end[0] - start[0])**2 + (end[1] - start[1])**2) ** 0.5
+            # 通过 scrcpy 发送 touch_up
+            if self._scrcpy_adapter and self._scrcpy_adapter.supports_touch:
+                self._scrcpy_adapter.touch_up(end[0], end[1])
             main_win = self.window()
             if dist > 10:
-                # 滑动操作：计算实际拖拽时长
+                # 滑动操作：使用完整轨迹时长
                 duration_ms = max(100, int((time.time() - getattr(self, '_rec_press_time', time.time())) * 1000))
                 if hasattr(main_win, 'on_swipe_picked'):
                     main_win.on_swipe_picked(start[0], start[1], end[0], end[1], duration_ms)
