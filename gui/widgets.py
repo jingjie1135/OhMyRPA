@@ -213,8 +213,11 @@ class ScreenshotWidget(QWidget):
                 painter.drawText(int(min(sx1, sx2)), int(min(sy1, sy2) - 4),
                                  f"{rw}×{rh}")
 
-        # 鼠标位置十字准星（绿色虚线）— 拖拽中不显示
-        if self._mouse_pos is not None and not self._is_dragging:
+        # 鼠标位置十字准星（绿色虚线）— 拖拽中，或在仅实时操作模式（非录制）下，不显示
+        hide_crosshair = self._is_dragging or (
+            getattr(self, '_live_control_mode', False) and not getattr(self, '_recording_mode', False)
+        )
+        if self._mouse_pos is not None and not hide_crosshair:
             mx_orig, my_orig = self._mouse_pos
             smx = ox + mx_orig * scale
             smy = oy + my_orig * scale
@@ -284,6 +287,16 @@ class ScreenshotWidget(QWidget):
         orig_y = int(rel_y / layout['scale'])
         return orig_x, orig_y
 
+    def mouseDoubleClickEvent(self, event):
+        """鼠标双击：用来执行唤醒屏幕等无特定坐标的快捷操作"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 在实时控制模式下，双击发送亮屏（back_or_screen_on）信号
+            if getattr(self, '_live_control_mode', False) and self._scrcpy_adapter:
+                self._scrcpy_adapter.back_or_screen_on()
+                
+            # 也可以记录双击的坐标，暂时我们只用来唤醒屏幕
+            super().mouseDoubleClickEvent(event)
+
     def mousePressEvent(self, event):
         """鼠标按下：录制模式下仅拾取坐标，否则记录拖拽起点。"""
         if event.button() != Qt.MouseButton.LeftButton:
@@ -294,8 +307,8 @@ class ScreenshotWidget(QWidget):
         if result is None:
             return
 
-        # 录制模式：记录起点，等 release 判断是点击还是滑动
-        if getattr(self, '_recording_mode', False):
+        # 录制模式或实时操作模式：记录起点，等 release 判断是点击还是滑动
+        if getattr(self, '_recording_mode', False) or getattr(self, '_live_control_mode', False):
             self._rec_start = result
             self._rec_dragging = True
             self._rec_press_time = time.time()  # 记录按下时间
@@ -321,8 +334,8 @@ class ScreenshotWidget(QWidget):
         if result is None:
             return
 
-        # 录制模式：更新拖拽终点
-        if getattr(self, '_recording_mode', False) and getattr(self, '_rec_dragging', False):
+        # 录制模式或实时操作模式：更新拖拽终点
+        if getattr(self, '_rec_dragging', False) and (getattr(self, '_recording_mode', False) or getattr(self, '_live_control_mode', False)):
             self._rec_end = result
             # 记录轨迹点
             self._rec_path.append((result[0], result[1], int(time.time() * 1000)))
@@ -344,8 +357,8 @@ class ScreenshotWidget(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
-        # 录制模式：判断点击或滑动
-        if getattr(self, '_recording_mode', False) and getattr(self, '_rec_dragging', False):
+        # 录制模式或实时操作模式：判断点击或滑动
+        if getattr(self, '_rec_dragging', False) and (getattr(self, '_recording_mode', False) or getattr(self, '_live_control_mode', False)):
             self._rec_dragging = False
             result = self._widget_to_original(
                 event.position().x(), event.position().y()
@@ -356,12 +369,21 @@ class ScreenshotWidget(QWidget):
             # 通过 scrcpy 发送 touch_up
             if self._scrcpy_adapter and self._scrcpy_adapter.supports_touch:
                 self._scrcpy_adapter.touch_up(end[0], end[1])
+            
+            # 如果仅仅是实时操作模式（非录制），则不再上报主窗口事件
+            if not getattr(self, '_recording_mode', False):
+                self._rec_start = None
+                self._rec_end = None
+                self.update()
+                return
+
             main_win = self.window()
             if dist > 10:
                 # 滑动操作：使用完整轨迹时长
                 duration_ms = max(100, int((time.time() - getattr(self, '_rec_press_time', time.time())) * 1000))
+                path = getattr(self, '_rec_path', [])
                 if hasattr(main_win, 'on_swipe_picked'):
-                    main_win.on_swipe_picked(start[0], start[1], end[0], end[1], duration_ms)
+                    main_win.on_swipe_picked(start[0], start[1], end[0], end[1], duration_ms, path)
             else:
                 # 单击操作
                 if hasattr(main_win, 'on_coord_picked'):

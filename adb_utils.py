@@ -215,24 +215,47 @@ def tap(device_id, x, y):
         logger.warning("[%s] 点击命令超时: (%d, %d)", device_id, x, y)
 
 
-def swipe(device_id, x1, y1, x2, y2, duration_ms=300):
+def swipe(device_id: str, x1: int, y1: int, x2: int, y2: int,
+          duration_ms: int = 300) -> None:
     """
-    执行 ADB 滑动操作。
+    通过 ADB 发送滑动事件（受限于 ADB，滑动轨迹为直线）。
 
     Args:
         device_id (str): 设备 ID
-        x1, y1 (int): 起始坐标
-        x2, y2 (int): 结束坐标
-        duration_ms (int): 滑动时长（毫秒）
+        x1 (int): 起点 X 坐标
+        y1 (int): 起点 Y 坐标
+        x2 (int): 终点 X 坐标
+        y2 (int): 终点 Y 坐标
+        duration_ms (int, optional): 滑动总耗时（毫秒）。默认为 300。
     """
     try:
         subprocess.run(
             [config.ADB_PATH, "-s", device_id, "shell", "input", "swipe",
-             str(x1), str(y1), str(x2), str(y2), str(duration_ms)],
-            capture_output=True,
-            timeout=10,
+             str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(int(duration_ms))],
+            check=True, timeout=10,
             creationflags=_SUBPROCESS_FLAGS
         )
-        logger.debug("[%s] 滑动 (%d,%d) → (%d,%d) %dms", device_id, x1, y1, x2, y2, duration_ms)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[{device_id}] ADB 滑动失败: {e.stderr}")
     except subprocess.TimeoutExpired:
-        logger.warning("[%s] 滑动命令超时", device_id)
+        logger.error(f"[{device_id}] ADB 滑动超时")
+
+
+def keyevent(device_id: str, keycode: int) -> None:
+    """
+    通过 ADB 发送物理按键事件。
+
+    Args:
+        device_id (str): 设备 ID
+        keycode (int): Android KeyCode
+    """
+    try:
+        subprocess.run(
+            [config.ADB_PATH, "-s", device_id, "shell", "input", "keyevent", str(keycode)],
+            check=True, timeout=5,
+            creationflags=_SUBPROCESS_FLAGS
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[{device_id}] ADB 按键失败 (KeyCode={keycode}): {e.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error(f"[{device_id}] ADB 按键超时 (KeyCode={keycode})")

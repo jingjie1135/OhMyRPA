@@ -28,8 +28,6 @@ class BotWorker(QThread):
     match_signal = pyqtSignal(list)
     # 运行状态文本 → GUI 状态栏
     status_signal = pyqtSignal(str)
-    # 购买计数 → GUI 显示
-    buy_count_signal = pyqtSignal(int)
     # 线程完成信号
     finished_signal = pyqtSignal()
 
@@ -66,7 +64,6 @@ class BotWorker(QThread):
             'on_log': self._on_log,
             'on_screenshot': self._on_screenshot,
             'on_match': self._on_match,
-            'on_buy_count': self._on_buy_count,
         }
 
         self.engine = ScriptEngine(
@@ -135,7 +132,3 @@ class BotWorker(QThread):
     def _on_match(self, matches):
         """匹配结果回调 → 信号。"""
         self.match_signal.emit(matches)
-
-    def _on_buy_count(self, count):
-        """购买计数回调 → 信号。"""
-        self.buy_count_signal.emit(count)

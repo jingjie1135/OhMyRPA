@@ -29,6 +29,9 @@ ACTION_REGISTRY = {
     "wait_image":    ("⏳", "找图等待",   "图像识别"),
     "loop_start":    ("🔄", "循环开始",   "流程控制"),
     "loop_end":      ("🔚", "循环结束",   "流程控制"),
+    "back":          ("◀", "返回键",     "系统按键"),
+    "home":          ("⌂", "主页键",     "系统按键"),
+    "app_switch":    ("⎕", "多任务键",   "系统按键"),
 }
 
 
@@ -72,6 +75,12 @@ def format_action_text(node) -> str:
         return "🔄 循环开始"
     elif t == "loop_end":
         return "🔚 循环结束"
+    elif t == "back":
+        return "◀ 返回键"
+    elif t == "home":
+        return "⌂ 主页键"
+    elif t == "app_switch":
+        return "⎕ 多任务键"
     else:
         return f"❓ {t}"
 
@@ -126,6 +135,16 @@ def build_swipe_props(layout: QFormLayout, node, update_fn, context: dict = None
     spin_dur.setValue(node.params.get("duration", 300))
     spin_dur.valueChanged.connect(lambda v: update_fn("duration", v))
     layout.addRow("滑动时长:", spin_dur)
+
+    if "path" in node.params and node.params["path"]:
+        path_len = len(node.params["path"])
+        from PyQt6.QtWidgets import QLabel
+        path_label = QLabel(f"ℹ️ 包含 {path_len} 个高精度轨迹序列点")
+        path_label.setStyleSheet("color: #a6e3a1; font-size: 11px;")
+        layout.addRow(path_label)
+
+    # 测试按钮
+    _add_test_swipe_btn(layout, node, context)
 
 
 def build_find_and_tap_props(layout: QFormLayout, node, update_fn, context: dict = None):
@@ -341,6 +360,11 @@ def append_comment_row(layout: QFormLayout, node):
     layout.addRow("备注:", comment_edit)
 
 
+def build_system_key_props(layout: QFormLayout, node, update_fn, context: dict = None):
+    """系统按键 — 属性面板（无特定参数）"""
+    layout.addRow(QLabel("此操作没有可配置的参数。"))
+
+
 # =================== 统一分派 ===================
 
 # 各指令类型对应的构建函数
@@ -351,6 +375,9 @@ _BUILDERS = {
     "find_and_tap": build_find_and_tap_props,
     "wait_image": build_wait_image_props,
     "multi_match": build_multi_match_props,
+    "back": build_system_key_props,
+    "home": build_system_key_props,
+    "app_switch": build_system_key_props,
 }
 
 
@@ -408,6 +435,41 @@ def _add_test_tap_btn(layout, node, context):
             if hasattr(main_win, '_append_log'):
                 main_win._append_log(f"🧪 测试点击 ({x}, {y})")
     test_btn.clicked.connect(_test_tap)
+    layout.addRow(test_btn)
+
+
+def _add_test_swipe_btn(layout, node, context):
+    """添加「测试滑动」按钮"""
+    ctx = context or {}
+    main_win = ctx.get("main_win")
+    if not main_win:
+        return
+
+    test_btn = QPushButton("🧪 测试滑动")
+    test_btn.setToolTip("在当前设备上执行一次滑动")
+    def _test_swipe():
+        import threading
+        device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
+        if not device_id:
+            return
+
+        path = node.params.get('path')
+        if path:
+            adapter = main_win._get_active_adapter()
+            if adapter and getattr(adapter, 'supports_touch', False):
+                threading.Thread(target=adapter.swipe_path, args=(path,), daemon=True).start()
+                if hasattr(main_win, '_append_log'):
+                    main_win._append_log(f"🧪 测试高级轨迹滑动 (共 {len(path)} 个控制点)")
+                return
+
+        from adb_utils import swipe as adb_swipe
+        x1, y1 = node.params.get('x1', 0), node.params.get('y1', 0)
+        x2, y2 = node.params.get('x2', 0), node.params.get('y2', 0)
+        dur = node.params.get('duration', 300)
+        threading.Thread(target=adb_swipe, args=(device_id, x1, y1, x2, y2, dur), daemon=True).start()
+        if hasattr(main_win, '_append_log'):
+            main_win._append_log(f"🧪 测试直线滑动 ({x1}, {y1}) → ({x2}, {y2}) {dur}ms")
+    test_btn.clicked.connect(_test_swipe)
     layout.addRow(test_btn)
 
 

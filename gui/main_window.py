@@ -64,6 +64,9 @@ class MainWindow(QMainWindow):
         self._screencap_worker = None   # 截图后台线程
         self._buy_count = 0
 
+        # 群控管理
+        self._group_adapters = {}
+
         self._init_ui()
         self._connect_signals()
         self._apply_styles()
@@ -131,6 +134,14 @@ class MainWindow(QMainWindow):
         self.restart_adb_btn.setToolTip("使用当前选中的 ADB 重启服务器")
         top_bar.addWidget(self.restart_adb_btn)
 
+        self.group_control_btn = QPushButton("👥 群控")
+        self.group_control_btn.setFont(create_font(9, bold=True))
+        self.group_control_btn.setFixedSize(90, 28)
+        self.group_control_btn.setStyleSheet(f"color: {COLOR_PRIMARY};")
+        self.group_control_btn.setToolTip("开启多设备群控模式 (纯控制通道)")
+        self.group_control_btn.setCheckable(True)
+        top_bar.addWidget(self.group_control_btn)
+
         top_bar.addStretch()
 
         # 状态栏
@@ -144,10 +155,10 @@ class MainWindow(QMainWindow):
         self.status_label.setMinimumWidth(100)
         top_bar.addWidget(self.status_label)
 
-        self.buy_count_label = QLabel("已购买: 0")
-        self.buy_count_label.setFont(create_font(9, bold=True))
-        self.buy_count_label.setStyleSheet(f"color: {COLOR_SUCCESS};")
-        top_bar.addWidget(self.buy_count_label)
+        self.scrcpy_count_label = QLabel("连接数: 0")
+        self.scrcpy_count_label.setFont(create_font(9, bold=True))
+        self.scrcpy_count_label.setStyleSheet(f"color: {COLOR_SUCCESS};")
+        top_bar.addWidget(self.scrcpy_count_label)
 
         self.fps_label = QLabel("")
         self.fps_label.setFont(create_font(9, bold=True))
@@ -192,6 +203,13 @@ class MainWindow(QMainWindow):
         self.live_sync_btn.setCheckable(True)
         sidebar.addWidget(self.live_sync_btn)
 
+        self.display_power_btn = QPushButton("🌙\n熄屏")
+        self.display_power_btn.setFont(create_font(9))
+        self.display_power_btn.setFixedSize(50, 50)
+        self.display_power_btn.setToolTip("【Scrcpy专属】关闭物理屏幕背光但保持画面传输")
+        self.display_power_btn.setCheckable(True)
+        sidebar.addWidget(self.display_power_btn)
+
         # 录制期间的控制按钮（仅录制时可见）
         self.sidebar_pause_btn = QPushButton("⏸\n暂停")
         self.sidebar_pause_btn.setFont(create_font(9))
@@ -210,6 +228,26 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.sidebar_stop_btn)
 
         sidebar.addStretch()
+
+        # 底部系统级控制按钮
+        self.back_btn = QPushButton("◀\n返回")
+        self.back_btn.setFont(create_font(9))
+        self.back_btn.setFixedSize(50, 50)
+        self.back_btn.setToolTip("返回上一级")
+        sidebar.addWidget(self.back_btn)
+
+        self.home_btn = QPushButton("⌂\n主页")
+        self.home_btn.setFont(create_font(9))
+        self.home_btn.setFixedSize(50, 50)
+        self.home_btn.setToolTip("回到主页")
+        sidebar.addWidget(self.home_btn)
+
+        self.app_switch_btn = QPushButton("⎕\n多任务")
+        self.app_switch_btn.setFont(create_font(9))
+        self.app_switch_btn.setFixedSize(50, 50)
+        self.app_switch_btn.setToolTip("切换多任务")
+        sidebar.addWidget(self.app_switch_btn)
+
         preview_layout.addLayout(sidebar)
 
         splitter.addWidget(self.preview_container)
@@ -288,12 +326,20 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         """连接信号槽。"""
         self.adb_combo.currentIndexChanged.connect(self._on_adb_changed)
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         self.refresh_device_btn.clicked.connect(self._refresh_devices)
         self.restart_adb_btn.clicked.connect(self._restart_adb)
         self.start_btn.toggled.connect(self._on_start_toggled)
         self.pause_btn.clicked.connect(self._on_pause)
         self.screenshot_btn.clicked.connect(self._on_manual_screenshot)
         self.live_sync_btn.clicked.connect(self._on_toggle_live_sync)
+        self.display_power_btn.clicked.connect(self._on_toggle_display_power)
+        self.group_control_btn.clicked.connect(self._on_toggle_group_control)
+
+        # 系统控制按钮
+        self.back_btn.clicked.connect(self._on_action_back)
+        self.home_btn.clicked.connect(self._on_action_home)
+        self.app_switch_btn.clicked.connect(self._on_action_app_switch)
 
         # 预览区鼠标进出事件过滤（录制时自动暂停/恢复）
         self.preview_container.installEventFilter(self)
@@ -499,14 +545,39 @@ class MainWindow(QMainWindow):
     def _on_devices_found(self, devices):
         """设备扫描完成回调。"""
         self.refresh_device_btn.setEnabled(True)
+        self.device_combo.blockSignals(True)
         self.device_combo.clear()
         if devices:
             self.device_combo.addItems(devices)
+            self.device_combo.blockSignals(False)
             self._append_log(f"发现 {len(devices)} 个设备: {', '.join(devices)}")
             self._detect_resolution(devices[0])
+            # 刷新设备列表后，如果之前状态是开启同步且选中了新设备，应该重启同步
+            if self.live_sync_btn.isChecked():
+                self._on_toggle_live_sync(False)
+                self._on_toggle_live_sync(True)
         else:
+            self.device_combo.blockSignals(False)
             self._append_log("未发现设备，请检查模拟器是否启动")
             self.resolution_label.setText("")
+
+    @pyqtSlot(int)
+    def _on_device_changed(self, index):
+        """设备下拉选择变更时的响应。"""
+        if index < 0:
+            return
+        device_id = self.device_combo.currentText()
+        if not device_id or device_id == "扫描中...":
+            return
+            
+        self._append_log(f"已切换目标设备 -> {device_id}")
+        self._detect_resolution(device_id)
+        
+        # 切换设备时，如果当前属于开启同步状态，需要重启同步进程绑定到新设备上
+        if self.live_sync_btn.isChecked():
+            self._append_log("正在切换实时同步的设备...")
+            self._on_toggle_live_sync(False)
+            self._on_toggle_live_sync(True)
 
     @pyqtSlot(str)
     def _on_devices_error(self, err):
@@ -594,7 +665,6 @@ class MainWindow(QMainWindow):
         self._worker.screenshot_signal.connect(self.screenshot_widget.update_screenshot)
         self._worker.match_signal.connect(self.screenshot_widget.update_matches)
         self._worker.status_signal.connect(self._update_status)
-        self._worker.buy_count_signal.connect(self._update_buy_count)
         self._worker.finished_signal.connect(self._on_worker_finished)
 
         self._worker.start()
@@ -696,9 +766,10 @@ class MainWindow(QMainWindow):
         """ScrcpyAdapter 就绪回调：注入到 ScreenshotWidget 供录制/操作使用。"""
         self.screenshot_widget._scrcpy_adapter = adapter
         self._append_log("ScrcpyAdapter 已就绪（支持低延迟触摸操作）")
+        self._update_ui_scrcpy_count()
 
     def _on_toggle_live_sync(self, checked):
-        """实时同步开关：启动/停止持续截图。"""
+        """实时同步开关：启动/停止持续截图与实时操纵。"""
         if checked:
             worker = self._ensure_screencap_worker()
             if worker is None:
@@ -712,7 +783,8 @@ class MainWindow(QMainWindow):
 
             self.live_sync_btn.setText("⏹\n停止")
             self.screenshot_btn.setEnabled(False)
-            self._append_log("实时画面同步已启动")
+            self.screenshot_widget._live_control_mode = True
+            self._append_log("实时画面同步已启动（支持直接操作屏幕）")
         else:
             if self._screencap_worker is not None:
                 self._screencap_worker.requestInterruption()
@@ -720,7 +792,138 @@ class MainWindow(QMainWindow):
 
             self.live_sync_btn.setText("▶\n同步")
             self.screenshot_btn.setEnabled(True)
+            self.screenshot_widget._live_control_mode = False
+            self.screenshot_widget._scrcpy_adapter = None # 清除旧设备的控制器引用
             self._append_log("实时画面同步已停止")
+
+        self._update_ui_scrcpy_count()
+
+    # ---------- 系统控制按钮操作 ----------
+
+    def _get_active_adapter(self):
+        """获取当前适配器：优先 ScrcpyAdapter，否则回退 AdbAdapter"""
+        if getattr(self.screenshot_widget, '_scrcpy_adapter', None) and self.screenshot_widget._scrcpy_adapter.supports_touch:
+            return self.screenshot_widget._scrcpy_adapter
+        device_id = self.device_combo.currentText()
+        if device_id:
+            from device_adapter import AdbAdapter
+            return AdbAdapter(device_id)
+        return None
+        
+    def _get_all_active_adapters(self):
+        """获取所有存活的可执行适配器（用于群控）。"""
+        adapters = []
+        # 主同步设备
+        if getattr(self.screenshot_widget, '_scrcpy_adapter', None) and self.screenshot_widget._scrcpy_adapter.supports_touch:
+            adapters.append(self.screenshot_widget._scrcpy_adapter)
+        # 群控的控制通道设备
+        for device_id, adapter in self._group_adapters.items():
+            if adapter and adapter.supports_touch:
+                adapters.append(adapter)
+        # 如果既没有同步也没有群控，退化为仅在当前 ADB 设备上进行单控
+        if not adapters:
+            single = self._get_active_adapter()
+            if single:
+                adapters.append(single)
+        return adapters
+
+    def _on_toggle_group_control(self, checked: bool):
+        from PyQt6.QtWidgets import QApplication
+        from adb_utils import get_connected_devices
+        
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if checked:
+                devices = get_connected_devices()
+                current_sync = self.device_combo.currentText() if self.live_sync_btn.isChecked() else None
+                success_count = 0
+                
+                self._append_log(f"🔄 正在为 {len(devices)} 台设备初始化控制通道...")
+                
+                import threading
+                def _connect_worker(d_id):
+                    nonlocal success_count
+                    if d_id == current_sync:
+                        return # 已经有主通道了
+                    try:
+                        from scrcpy_client import ScrcpyClient
+                        from device_adapter import ScrcpyAdapter
+                        client = ScrcpyClient(d_id, control_only=True)
+                        client.start(threaded=False)
+                        adapter = ScrcpyAdapter(d_id, client)
+                        self._group_adapters[d_id] = adapter
+                        success_count += 1
+                        self._append_log(f"✅ {d_id} 无画面控制通道建立成功")
+                    except Exception as e:
+                        self._append_log(f"❌ {d_id} 控制通道建立失败: {e}")
+                
+                threads = []
+                for d in devices:
+                    t = threading.Thread(target=_connect_worker, args=(d,))
+                    threads.append(t)
+                    t.start()
+                
+                for t in threads:
+                    t.join()
+                
+                self._append_log(f"🎉 群控已启动（通道数: {success_count}）")
+                self.group_control_btn.setText("⏹ 停控")
+            else:
+                self._append_log("🔴 正在关闭群控通道...")
+                for d_id, adapter in self._group_adapters.items():
+                    if adapter and getattr(adapter, 'client', None):
+                        try:
+                            adapter.client.stop()
+                        except: pass
+                self._group_adapters.clear()
+                self._append_log("✅ 群控已停止")
+                self.group_control_btn.setText("👥 群控")
+                
+            self._update_ui_scrcpy_count()
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _update_ui_scrcpy_count(self):
+        """更新 UI 上的 Scrcpy 连接数"""
+        count = len(self._group_adapters)
+        if hasattr(self.screenshot_widget, '_scrcpy_adapter') and self.screenshot_widget._scrcpy_adapter and self.screenshot_widget._scrcpy_adapter.supports_touch:
+            count += 1
+        self._update_scrcpy_count(count)
+
+    def _on_action_back(self):
+        adapter = self._get_active_adapter()
+        if adapter:
+            adapter.back()
+            self._record_system_action("back")
+
+    def _on_action_home(self):
+        adapter = self._get_active_adapter()
+        if adapter:
+            adapter.home()
+            self._record_system_action("home")
+
+    def _on_action_app_switch(self):
+        adapter = self._get_active_adapter()
+        if adapter:
+            adapter.app_switch()
+            self._record_system_action("app_switch")
+            
+    def _record_system_action(self, action_type: str):
+        """如果当前处于录制状态，将系统快捷键操作发送到由于 ScriptTab"""
+        if hasattr(self, 'script_tab') and getattr(self.script_tab, 'is_recording', False):
+            self.script_tab.on_recorded_system_action(action_type)
+
+    def _on_toggle_display_power(self, checked: bool):
+        adapter = self._get_active_adapter()
+        if adapter:
+            on = not checked  # 选中(熄屏) -> on=False
+            adapter.set_display_power(on)
+            if checked:
+                self.display_power_btn.setText("💡\n亮屏")
+                self._append_log("已发送熄屏指令 (关闭物理屏幕背光)")
+            else:
+                self.display_power_btn.setText("🌙\n熄屏")
+                self._append_log("已发送亮屏指令")
 
 
 
@@ -746,14 +949,14 @@ class MainWindow(QMainWindow):
         else:
             self._append_log(f"拾取坐标: ({x}, {y})")
 
-    def on_swipe_picked(self, x1, y1, x2, y2, duration_ms=300):
+    def on_swipe_picked(self, x1, y1, x2, y2, duration_ms=300, path=None):
         """截图预览区滑动拾取回调。"""
         self.coord_label.setText(f"滑动: ({x1},{y1})→({x2},{y2}) {duration_ms}ms")
         
         if getattr(self.script_tab, 'is_recording', False):
             self._append_log(f"🔴 [录制] 滑动 ({x1},{y1})→({x2},{y2}) {duration_ms}ms")
             device_id = self.device_combo.currentText()
-            self.script_tab.on_recorded_swipe(device_id, x1, y1, x2, y2, duration_ms)
+            self.script_tab.on_recorded_swipe(device_id, x1, y1, x2, y2, duration_ms, path)
         else:
             self._append_log(f"滑动: ({x1},{y1})→({x2},{y2})")
 
@@ -769,10 +972,9 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"状态: {status}")
 
     @pyqtSlot(int)
-    def _update_buy_count(self, count):
-        """更新购买计数。"""
-        self._buy_count = count
-        self.buy_count_label.setText(f"已购买: {count}")
+    def _update_scrcpy_count(self, count):
+        """更新 Scrcpy 连接数显示。"""
+        self.scrcpy_count_label.setText(f"连接数: {count}")
 
     @pyqtSlot(float)
     def _on_fps_update(self, fps):

@@ -420,8 +420,8 @@ class ScriptTab(QWidget):
         worker.start()
         self._refresh_action_list_text()
 
-    def on_recorded_swipe(self, device_id: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300):
-        """录制滑动操作（duration_ms 来自实际拖拽时长）"""
+    def on_recorded_swipe(self, device_id: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300, path: list = None):
+        """记录滑动动作：如果有完整轨迹则保留完整轨迹用于高精度重放"""
         if self._recording_paused:
             return
         
@@ -451,9 +451,13 @@ class ScriptTab(QWidget):
         self.last_record_time = now
         
         # 创建 swipe 动作节点
+        params = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": duration_ms}
+        if path:
+            params["path"] = path
+            
         node = ActionNode(
             action_type="swipe",
-            params={"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": duration_ms}
+            params=params
         )
         self.current_model.actions.append(node)
         from PyQt6.QtWidgets import QListWidgetItem
@@ -462,12 +466,53 @@ class ScriptTab(QWidget):
         self.action_list.addItem(list_item)
         self._refresh_action_list_text()
         
-        # 后台执行 ADB swipe
+        # 后台执行 ADB swipe 测试/同步
         import threading
         def _do_swipe():
             from adb_utils import swipe as adb_swipe
             adb_swipe(device_id, x1, y1, x2, y2, duration_ms)
         threading.Thread(target=_do_swipe, daemon=True).start()
+
+    def on_recorded_system_action(self, action_type: str):
+        """主窗口触发系统按钮后，调用的录制钩子"""
+        if self._recording_paused:
+            return
+            
+        import time
+        now = time.time()
+        
+        # 最小间隔保护 1 秒
+        if self.last_record_time > 0 and (now - self.last_record_time) < 1.0:
+            main_win = self.window()
+            if hasattr(main_win, '_append_log'):
+                main_win._append_log("⚠️ 操作过快（<1s），已忽略。")
+            return
+            
+        # 自动插入 sleep
+        elapsed_ms = self._get_recording_elapsed_ms()
+        if elapsed_ms > 100 and self.last_record_time > 0:
+            sleep_sec = round(elapsed_ms / 1000.0, 1)
+            sleep_node = ActionNode(action_type="sleep", params={"seconds": sleep_sec})
+            self.current_model.actions.append(sleep_node)
+            from PyQt6.QtWidgets import QListWidgetItem
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, sleep_node.id)
+            self.action_list.addItem(item)
+            
+        # 插入系统按键动作
+        node = ActionNode(action_type=action_type, params={})
+        self.current_model.actions.append(node)
+        from PyQt6.QtWidgets import QListWidgetItem
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, node.id)
+        self.action_list.addItem(item)
+        
+        self._refresh_action_list_text()
+        
+        # 更新计时和状态
+        self.last_record_time = time.time()
+        self._record_elapsed_before_pause = 0
+        self._record_timer.start()
 
     def _on_new_clicked(self):
         """新建脚本项目：立即创建项目文件夹结构"""

@@ -46,9 +46,12 @@ class DeviceAdapter(ABC):
         ...
 
     @abstractmethod
-    def swipe(self, x1: int, y1: int, x2: int, y2: int,
-              duration_ms: int = 300) -> None:
-        """直线滑动。"""
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
+        """直线滑动操作。"""
+        ...
+        
+    def swipe_path(self, path: list) -> None:
+        """根据完整的轨迹点回放多段滑动。path 格式: [(x, y, timestamp_ms), ...]"""
         ...
 
     def touch_down(self, x: int, y: int, touch_id: int = -1) -> None:
@@ -63,16 +66,25 @@ class DeviceAdapter(ABC):
         """手指抬起（默认不支持，子类可覆盖）。"""
         raise NotImplementedError("此 Adapter 不支持精细触摸操作")
 
-    def swipe_path(self, points: list, duration_ms: int = 500) -> None:
-        """
-        沿路径滑动（默认用直线 swipe 近似）。
-        points: [(x, y, timestamp_ms), ...] 路径点列表
-        """
-        if len(points) < 2:
-            return
-        start = points[0]
-        end = points[-1]
-        self.swipe(start[0], start[1], end[0], end[1], duration_ms)
+    def back(self) -> None:
+        """触发返回操作。"""
+        ...
+
+    def home(self) -> None:
+        """触发主页操作。"""
+        ...
+
+    def app_switch(self) -> None:
+        """触发多任务切换操作。"""
+        ...
+
+    def set_display_power(self, on: bool) -> None:
+        """设置屏幕电源状态 (熄屏/亮屏)。"""
+        ...
+
+    def back_or_screen_on(self) -> None:
+        """唤醒屏幕（如果亮屏则等同于按下 Back）。"""
+        ...
 
     @property
     def supports_touch(self) -> bool:
@@ -111,11 +123,39 @@ class AdbAdapter(DeviceAdapter):
         from adb_utils import tap as adb_tap
         adb_tap(self._device_id, x, y)
 
-    def swipe(self, x1: int, y1: int, x2: int, y2: int,
-              duration_ms: int = 300) -> None:
-        from adb_utils import swipe as adb_swipe
-        adb_swipe(self._device_id, x1, y1, x2, y2, duration_ms)
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
+        from adb_utils import swipe
+        swipe(self._device_id, x1, y1, x2, y2, duration_ms)
+        
+    def swipe_path(self, path: list) -> None:
+        """ADB无法执行平滑的多点触摸，回退为取首尾点直线滑动"""
+        if len(path) >= 2:
+            x1, y1 = path[0][:2]
+            x2, y2 = path[-1][:2]
+            dur = max(100, path[-1][2] - path[0][2])
+            from adb_utils import swipe
+            swipe(self._device_id, x1, y1, x2, y2, dur)
 
+    def back(self) -> None:
+        from adb_utils import keyevent
+        keyevent(self._device_id, 4)
+
+    def home(self) -> None:
+        from adb_utils import keyevent
+        keyevent(self._device_id, 3)
+
+    def app_switch(self) -> None:
+        from adb_utils import keyevent
+        keyevent(self._device_id, 187)
+
+    def set_display_power(self, on: bool) -> None:
+        """ADB无法直接精准设置屏幕电源，只能发送 power 按键翻转状态"""
+        from adb_utils import keyevent
+        keyevent(self._device_id, 26) # KEYCODE_POWER
+
+    def back_or_screen_on(self) -> None:
+        from adb_utils import keyevent
+        keyevent(self._device_id, 224) # KEYCODE_WAKEUP
 
 # ==================== ScrcpyAdapter ====================
 
@@ -165,13 +205,29 @@ class ScrcpyAdapter(DeviceAdapter):
         else:
             logger.warning("ScrcpyAdapter: 连接未就绪，tap 操作被忽略")
 
-    def swipe(self, x1: int, y1: int, x2: int, y2: int,
-              duration_ms: int = 300) -> None:
-        """通过 scrcpy 控制通道发送带缓动的平滑滑动。"""
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
         if self._client and self._client.alive:
             self._client.control.swipe(x1, y1, x2, y2, duration_ms)
-        else:
-            logger.warning("ScrcpyAdapter: 连接未就绪，swipe 操作被忽略")
+            
+    def swipe_path(self, path: list) -> None:
+        """使用 Scrcpy 控制通道执行零延迟的高精度轨迹重放"""
+        if not path or not self._client or not self._client.alive:
+            return
+        
+        import time
+        x0, y0, t0 = path[0]
+        self._client.control.touch_down(x0, y0)
+        
+        last_t = t0
+        for i in range(1, len(path)):
+            x, y, t = path[i]
+            delay = (t - last_t) / 1000.0
+            if delay > 0:
+                time.sleep(delay)
+            self._client.control.touch_move(x, y)
+            last_t = t
+            
+        self._client.control.touch_up(path[-1][0], path[-1][1])
 
     def touch_down(self, x: int, y: int, touch_id: int = -1) -> None:
         """手指按下（通过 scrcpy 控制通道）。"""
@@ -188,13 +244,27 @@ class ScrcpyAdapter(DeviceAdapter):
         if self._client and self._client.alive:
             self._client.control.touch_up(x, y, touch_id)
 
-    def swipe_path(self, points: list, duration_ms: int = 500) -> None:
-        """沿路径滑动（通过 scrcpy 控制通道，支持曲线轨迹）。"""
+    def back(self) -> None:
         if self._client and self._client.alive:
-            self._client.control.swipe_path(points, duration_ms)
-        else:
-            # 回退到父类的简化直线 swipe
-            super().swipe_path(points, duration_ms)
+            self._client.control.back()
+
+    def home(self) -> None:
+        if self._client and self._client.alive:
+            self._client.control.home()
+
+    def app_switch(self) -> None:
+        if self._client and self._client.alive:
+            self._client.control.app_switch()
+
+    def set_display_power(self, on: bool) -> None:
+        if self._client and self._client.alive:
+            self._client.control.set_display_power(on)
+
+    def back_or_screen_on(self) -> None:
+        if self._client and self._client.alive:
+            # AndroidKeyeventAction.AKEY_EVENT_ACTION_DOWN (0) -> UP (1)
+            self._client.control.back_or_screen_on(0)
+            self._client.control.back_or_screen_on(1)
 
     @property
     def supports_touch(self) -> bool:

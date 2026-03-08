@@ -112,8 +112,26 @@ class ScriptEngine:
             x1, y1 = p.get('x1', 0), p.get('y1', 0)
             x2, y2 = p.get('x2', 0), p.get('y2', 0)
             dur = p.get('duration', 300)
-            self._log(f"👆 执行: 滑动 ({x1},{y1})→({x2},{y2}) {dur}ms")
-            self._adapter.swipe(x1, y1, x2, y2, dur)
+            path = p.get('path', [])
+            
+            if path and getattr(self._adapter, 'supports_touch', False):
+                self._log(f"👆 执行: 高精度轨迹滑动 ({len(path)} 个控制点)")
+                self._adapter.swipe_path(path)
+            else:
+                self._log(f"👆 执行: 滑动 ({x1},{y1})→({x2},{y2}) {dur}ms")
+                self._adapter.swipe(x1, y1, x2, y2, dur)
+            
+        elif action_type == "back":
+            self._log("◀ 执行: 返回键")
+            self._adapter.back()
+            
+        elif action_type == "home":
+            self._log("⌂ 执行: 主页键")
+            self._adapter.home()
+            
+        elif action_type == "app_switch":
+            self._log("⎕ 执行: 多任务键")
+            self._adapter.app_switch()
             
         elif action_type == "sleep":
             sec = p.get('seconds', 1.0)

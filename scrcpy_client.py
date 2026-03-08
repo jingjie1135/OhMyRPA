@@ -38,6 +38,17 @@ TYPE_INJECT_KEYCODE = 0
 TYPE_INJECT_TEXT = 1
 TYPE_INJECT_TOUCH_EVENT = 2
 TYPE_INJECT_SCROLL_EVENT = 3
+TYPE_BACK_OR_SCREEN_ON = 4
+TYPE_SET_DISPLAY_POWER = 10
+
+# Android KeyEvent 动作
+AKEY_EVENT_ACTION_DOWN = 0
+AKEY_EVENT_ACTION_UP = 1
+
+# Android KeyCodes (常用按键)
+AKEYCODE_HOME = 3
+AKEYCODE_BACK = 4
+AKEYCODE_APP_SWITCH = 187
 
 # 解码器错误恢复阈值（H.264 在等到关键帧前解码失败是正常的）
 MAX_DECODE_ERRORS = 30
@@ -111,6 +122,43 @@ class ControlSender:
     def touch_up(self, x: int, y: int, touch_id: int = -1) -> None:
         """手指抬起。"""
         self._touch_event(x, y, ACTION_UP, touch_id)
+
+    # ---------- 物理按键事件 ----------
+
+    def _inject_keycode(self, action: int, keycode: int, repeat: int = 0, metastate: int = 0) -> None:
+        """发送物理按键事件。"""
+        # >B (type), >B (action), >I (keycode), >I (repeat), >I (metastate)
+        data = struct.pack(">BBIII", TYPE_INJECT_KEYCODE, action, keycode, repeat, metastate)
+        self._send(data)
+
+    def press_keycode(self, keycode: int) -> None:
+        """完成一次物理按键点击 (DOWN + UP)。"""
+        self._inject_keycode(AKEY_EVENT_ACTION_DOWN, keycode)
+        self._inject_keycode(AKEY_EVENT_ACTION_UP, keycode)
+
+    def back(self) -> None:
+        """触发返回键"""
+        self.press_keycode(AKEYCODE_BACK)
+
+    def home(self) -> None:
+        """触发主页键"""
+        self.press_keycode(AKEYCODE_HOME)
+
+    def app_switch(self) -> None:
+        """触发多任务键"""
+        self.press_keycode(AKEYCODE_APP_SWITCH)
+
+    def back_or_screen_on(self, action: int = AKEY_EVENT_ACTION_DOWN) -> None:
+        """发送 BACK_OR_SCREEN_ON 指令（如果是黑屏则亮屏，否则相当于按下返回键）"""
+        # >B (type), >B (action)
+        data = struct.pack(">BB", TYPE_BACK_OR_SCREEN_ON, action)
+        self._send(data)
+
+    def set_display_power(self, on: bool) -> None:
+        """设置屏幕电源状态 (熄屏/亮屏，不影响画面传输)"""
+        # >B (type), >B (on)
+        data = struct.pack(">BB", TYPE_SET_DISPLAY_POWER, 1 if on else 0)
+        self._send(data)
 
     # ---------- 滑动操作 ----------
 
@@ -189,12 +237,14 @@ class ScrcpyClient:
         bitrate: int = 8_000_000,
         max_width: int = 0,
         block_frame: bool = True,
+        control_only: bool = False,
     ):
         self._device_id = device_id
         self._max_fps = max_fps
         self._bitrate = bitrate
         self._max_width = max_width
         self._block_frame = block_frame
+        self._control_only = control_only
 
         # 连接状态
         self.alive = False
@@ -249,11 +299,12 @@ class ScrcpyClient:
         for cb in self._init_listeners:
             cb()
 
-        if threaded:
-            t = threading.Thread(target=self._stream_loop, daemon=True)
-            t.start()
-        else:
-            self._stream_loop()
+        if not self._control_only:
+            if threaded:
+                t = threading.Thread(target=self._stream_loop, daemon=True)
+                t.start()
+            else:
+                self._stream_loop()
 
     def stop(self) -> None:
         """停止客户端，释放所有资源。"""
@@ -344,7 +395,10 @@ class ScrcpyClient:
         self._listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listen_socket.bind(("127.0.0.1", 0))  # 自动分配端口
-        self._listen_socket.listen(2)  # 最多接受 2 个连接（video + control）
+        
+        # Headless 模式只有 control 一个连接
+        conn_count = 1 if self._control_only else 2
+        self._listen_socket.listen(conn_count)  # 接受连接数量
         local_port = self._listen_socket.getsockname()[1]
         logger.info("[%s] 本地监听端口: %d", self._device_id, local_port)
 
@@ -373,7 +427,7 @@ class ScrcpyClient:
             "com.genymobile.scrcpy.Server",
             "3.3.3",                          # server 版本
             "log_level=info",
-            f"video_bit_rate={self._bitrate}",  # v3.x 参数名
+            f"video=false" if self._control_only else f"video_bit_rate={self._bitrate}",
             f"max_size={self._max_width}",
             f"max_fps={self._max_fps}",
             "audio=false",                     # v3.x 默认开启音频，这里关闭
@@ -430,14 +484,12 @@ class ScrcpyClient:
         monitor.start()
 
         try:
-            # 第一个连接：video socket
-            self._video_socket, _ = self._listen_socket.accept()
-            logger.info("[%s] video socket 已连接", self._device_id)
+            if not self._control_only:
+                # 第一个连接：video socket
+                self._video_socket, _ = self._listen_socket.accept()
+                logger.info("[%s] video socket 已连接", self._device_id)
 
-            # v3.3.3 不发送 dummy byte（send_dummy_byte 默认 false）
-            # 直接等待第二个连接
-
-            # 第二个连接：control socket
+            # 最后一个连接：control socket
             self._control_socket, _ = self._listen_socket.accept()
             logger.info("[%s] control socket 已连接", self._device_id)
 
@@ -453,21 +505,31 @@ class ScrcpyClient:
             self._listen_socket.close()
             self._listen_socket = None
 
-        # 读取设备信息（v3.3.3 格式：64B 设备名 + 4B AVCodecID + 4B 宽 + 4B 高 = 76 字节）
-        device_meta = self._recv_exact(self._video_socket, 76)
-        self.device_name = device_meta[:64].decode("utf-8").rstrip("\x00")
-        # AVCodecID 4 字节（跳过，当前只支持 H.264）
-        width = struct.unpack(">I", device_meta[68:72])[0]
-        height = struct.unpack(">I", device_meta[72:76])[0]
-        self.resolution = (width, height)
+        if not self._control_only:
+            # 读取设备信息（v3.3.3 格式：64B 设备名 + 4B AVCodecID + 4B 宽 + 4B 高 = 76 字节）
+            device_meta = self._recv_exact(self._video_socket, 76)
+            self.device_name = device_meta[:64].decode("utf-8").rstrip("\x00")
+            # AVCodecID 4 字节（跳过，当前只支持 H.264）
+            width = struct.unpack(">I", device_meta[68:72])[0]
+            height = struct.unpack(">I", device_meta[72:76])[0]
+            self.resolution = (width, height)
 
-        # 设置非阻塞模式
-        self._video_socket.setblocking(False)
+            # 设置非阻塞模式
+            self._video_socket.setblocking(False)
+        else:
+            self.device_name = self._device_id
+            from adb_utils import get_resolution
+            w, h = get_resolution(self._device_id)
+            if w == 0 or h == 0:
+                logger.warning("[%s] 无法获取分辨率，默认 1080x2340", self._device_id)
+                w, h = 1080, 2340
+            self.resolution = (w, h)
 
         logger.info(
-            "[%s] scrcpy 连接成功: %s (%dx%d)",
+            "[%s] scrcpy 连接成功: %s (%dx%d) (Headless: %s)",
             self._device_id, self.device_name,
-            self.resolution[0], self.resolution[1]
+            self.resolution[0], self.resolution[1],
+            self._control_only
         )
 
     # ---------- 辅助方法 ----------
@@ -517,14 +579,13 @@ class ScrcpyClient:
                 try:
                     header = self._recv_exact(self._video_socket, HEADER_SIZE)
                 except (socket.timeout, ConnectionError):
-                    # 超时检测
+                    # 超时检测（画面静止时 scrcpy 不发数据，属于正常现象）
                     if (time.monotonic() - last_frame_time) > FRAME_TIMEOUT_SEC:
-                        logger.warning(
-                            "[%s] 帧超时 %.1f 秒，重建解码器",
+                        logger.debug(
+                            "[%s] 画面静止超过 %.1f 秒 (等待新帧...)",
                             self._device_id, FRAME_TIMEOUT_SEC
                         )
-                        codec = CodecContext.create("h264", "r")
-                        last_frame_time = time.monotonic()
+                        last_frame_time = time.monotonic()  # 重置计数器，避免持续刷屏
                     continue
 
                 # 解析 meta header
