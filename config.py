@@ -4,10 +4,15 @@
 """
 
 import os
+import sys
 
 # ===================== 路径配置 =====================
-# 项目根目录（自动获取）
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 打包后（Nuitka --onefile）：__file__ 指向临时解压目录，需使用 exe 所在目录
+# 开发环境：直接使用脚本所在目录
+if getattr(sys, 'frozen', False) or '__compiled__' in dir():
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 目标物品图库目录
 TARGETS_DIR = os.path.join(BASE_DIR, "targets")

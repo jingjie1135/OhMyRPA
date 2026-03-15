@@ -170,18 +170,28 @@ class ScreenshotWidget(QWidget):
             painter.drawLine(int(sx - 12), int(sy), int(sx + 12), int(sy))
             painter.drawLine(int(sx), int(sy - 12), int(sx), int(sy + 12))
 
-            # Y 偏移 > 0 时才绘制蓝色准心（购买按钮位置）和连线
-            if self._y_offset > 0:
-                buy_sy = oy + (cy + self._y_offset) * scale
+            # 从 meta.json 读取该模板的偏移量，绘制蓝色准心（实际点击位置）
+            try:
+                import template_meta
+                pictures_dir = getattr(self, 'custom_save_dir', None) or ""
+                meta = template_meta.get(pictures_dir, name) if pictures_dir else {}
+                meta_ox = meta.get("offset_x", 0)
+                meta_oy = meta.get("offset_y", 0)
+            except Exception:
+                meta_ox, meta_oy = 0, 0
+
+            if meta_ox != 0 or meta_oy != 0:
+                click_sx = ox + (cx + meta_ox) * scale
+                click_sy = oy + (cy + meta_oy) * scale
                 pen_blue = QPen(QColor(50, 150, 255), 2)
                 painter.setPen(pen_blue)
-                painter.drawLine(int(sx - 12), int(buy_sy), int(sx + 12), int(buy_sy))
-                painter.drawLine(int(sx), int(buy_sy - 12), int(sx), int(buy_sy + 12))
+                painter.drawLine(int(click_sx - 12), int(click_sy), int(click_sx + 12), int(click_sy))
+                painter.drawLine(int(click_sx), int(click_sy - 12), int(click_sx), int(click_sy + 12))
 
-                # 虚线连接
+                # 虚线连接红色匹配位置和蓝色点击位置
                 pen_link = QPen(QColor(255, 255, 100), 1, Qt.PenStyle.DotLine)
                 painter.setPen(pen_link)
-                painter.drawLine(int(sx), int(sy), int(sx), int(buy_sy))
+                painter.drawLine(int(sx), int(sy), int(click_sx), int(click_sy))
 
             # 标签文字（绿色）
             painter.setPen(QColor(0, 220, 80))
@@ -438,7 +448,8 @@ class ScreenshotWidget(QWidget):
         # 裁切原图
         cropped = self._source_image.copy(x, y, w, h)
         from config import get_resolution_tag
-        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QComboBox, QMessageBox
+        from gui.template_save_dialog import TemplateSaveDialog
+        from PyQt6.QtWidgets import QDialog, QMessageBox
 
         if self.custom_save_dir:
             # 简化流程：直接保存到指定目录，只要求输入名称
@@ -447,28 +458,21 @@ class ScreenshotWidget(QWidget):
             res_tag = get_resolution_tag()
             saved = False
             while not saved:
-                dlg = QDialog(self)
-                dlg.setWindowTitle("保存模板图片")
-                form = QFormLayout(dlg)
-                name_edit = QLineEdit()
-                name_edit.setPlaceholderText("请输入模板名称")
-                name_edit.setMinimumHeight(32)
-                form.addRow(f"名称 ({w}×{h}):", name_edit)
-                name_edit.setFocus()
-                buttons = QDialogButtonBox(
-                    QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-                )
-                buttons.accepted.connect(dlg.accept)
-                buttons.rejected.connect(dlg.reject)
-                form.addRow(buttons)
-
-                if dlg.exec() != QDialog.DialogCode.Accepted or not name_edit.text().strip():
+                # 使用新的可视化配置窗
+                dlg = TemplateSaveDialog(self._source_pixmap, (x, y, w, h), self)
+                if dlg.exec() != QDialog.DialogCode.Accepted:
                     self._drag_start = None
                     self._drag_end = None
                     self.update()
                     return
+                
+                # custom_save_dir 流程中我们不需要选中的目录，因为它固定就是 self.custom_save_dir
+                _, name, ox, oy = dlg.get_result()
+                if not name:
+                    QMessageBox.warning(self, "错误", "必须输入模板名称！")
+                    continue
 
-                base_name = name_edit.text().strip()
+                base_name = name
                 save_path = os.path.join(save_dir, f"{base_name}@{res_tag}.png")
 
                 if os.path.exists(save_path):
@@ -481,6 +485,16 @@ class ScreenshotWidget(QWidget):
                         continue
 
                 cropped.save(save_path, "PNG")
+                
+                # 保存偏移量到 meta.json
+                import template_meta
+                # custom_save_dir 流程，目录就是 save_dir
+                template_meta.set_meta(save_dir, f"{base_name}@{res_tag}.png", offset_x=ox, offset_y=oy)
+                
+                # 清理图像匹配引擎缓存，使新模板立即生效
+                import image_engine
+                image_engine.clear_cache(save_dir)
+                
                 saved = True
                 self.template_saved.emit(save_path)
 
@@ -498,41 +512,23 @@ class ScreenshotWidget(QWidget):
 
         saved = False
         while not saved:
-            dlg = QDialog(self)
-            dlg.setWindowTitle("保存模板图片")
-            form = QFormLayout(dlg)
-
-            dir_combo = QComboBox()
-            dir_combo.addItems(dirs)
-            idx = dir_combo.findText(current_dir)
-            if idx >= 0:
-                dir_combo.setCurrentIndex(idx)
-            form.addRow("保存目录:", dir_combo)
-
-            name_edit = QLineEdit()
-            name_edit.setPlaceholderText("请输入模板名称")
-            name_edit.setMinimumHeight(32)
-            form.addRow(f"名称 ({w}×{h}):", name_edit)
-            name_edit.setFocus()
-
-            buttons = QDialogButtonBox(
-                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-            )
-            buttons.accepted.connect(dlg.accept)
-            buttons.rejected.connect(dlg.reject)
-            form.addRow(buttons)
-
-            if dlg.exec() != QDialog.DialogCode.Accepted or not name_edit.text().strip():
+            dlg = TemplateSaveDialog(self._source_pixmap, (x, y, w, h), self, dirs, current_dir)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 self._drag_start = None
                 self._drag_end = None
                 self.update()
                 return
+            
+            selected_dir, name, ox, oy = dlg.get_result()
+            if not name:
+                QMessageBox.warning(self, "错误", "必须输入模板名称！")
+                continue
 
-            save_dir = os.path.join(TARGETS_DIR, dir_combo.currentText())
+            save_dir = os.path.join(TARGETS_DIR, selected_dir)
             os.makedirs(save_dir, exist_ok=True)
             res_tag = get_resolution_tag()
-            base_name = name_edit.text().strip()
-            current_dir = dir_combo.currentText()
+            base_name = name
+            current_dir = selected_dir
             save_path = os.path.join(save_dir, f"{base_name}@{res_tag}.png")
 
             # 同名文件检测
@@ -552,10 +548,20 @@ class ScreenshotWidget(QWidget):
                             save_dir, f"{base_name}_{n}@{res_tag}.png"
                         )
                         if not os.path.exists(save_path):
+                            base_name = f"{base_name}_{n}"
                             break
                         n += 1
 
             cropped.save(save_path, "PNG")
+            
+            # 保存偏移量到 meta.json
+            import template_meta
+            template_meta.set_meta(save_dir, f"{base_name}@{res_tag}.png", offset_x=ox, offset_y=oy)
+            
+            # 清理图像匹配引擎缓存，使新模板立即生效
+            import image_engine
+            image_engine.clear_cache(save_dir)
+            
             saved = True
             
             self.template_saved.emit(save_path)
@@ -571,5 +577,5 @@ class ScreenshotWidget(QWidget):
 
         # 刷新图库
         if library_tab:
-            library_tab.dir_combo.setCurrentText(dir_combo.currentText())
+            library_tab.dir_combo.setCurrentText(current_dir)
             library_tab._load_images()

@@ -34,12 +34,12 @@ class _RecordClickWorker(QThread):
         self.enable_snapshot = enable_snapshot
         
     def run(self):
-        from adb_utils import screencap_to_memory, tap
+        from adb_utils import screencap_to_memory
         
         now = _time.time()
         snapshot_name = ""
         
-        # 1. 截图保存到项目 Temp 目录（可选，开启时有 1~3s 延迟）
+        # 使用 ADB 无损截图保存到项目 Temp 目录（可选）
         if self.enable_snapshot:
             img = screencap_to_memory(self.device_id)
             if img is not None:
@@ -47,9 +47,7 @@ class _RecordClickWorker(QThread):
                 snapshot_name = os.path.join(self.temp_dir, f"step_{int(now)}.png")
                 cv2.imencode('.png', img)[1].tofile(snapshot_name)
         
-        # 2. 执行点击
-        tap(self.device_id, self.x, self.y)
-        
+        # 注意：不再执行 tap()，因为用户在预览区的点击已通过 Scrcpy 实时送达设备
         self.finished.emit(snapshot_name, self.x, self.y, now)
 
 class ScriptTab(QWidget):
@@ -73,7 +71,16 @@ class ScriptTab(QWidget):
 
     def _init_ui(self):
         """构建界面。"""
-        main_layout = QVBoxLayout(self)
+        # 外层用 QStackedWidget 支持图库页面切换
+        from PyQt6.QtWidgets import QStackedWidget
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        self._page_stack = QStackedWidget()
+        outer_layout.addWidget(self._page_stack)
+
+        # 主编辑器页面
+        editor_page = QWidget()
+        main_layout = QVBoxLayout(editor_page)
         main_layout.setSpacing(10)
 
         # 1. 顶部工具栏 (Top Toolbar)
@@ -111,6 +118,8 @@ class ScriptTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         self.toolbox_tree = QTreeWidget()
         self.toolbox_tree.setHeaderHidden(True)
+        # 减少缩进量，避免文字被截断
+        self.toolbox_tree.setIndentation(12)
         self._populate_toolbox()
         left_layout.addWidget(self.toolbox_tree)
         
@@ -151,9 +160,12 @@ class ScriptTab(QWidget):
         splitter.addWidget(left_widget)
         splitter.addWidget(center_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([200, 400, 250])
+        splitter.setSizes([210, 390, 250])
         
         main_layout.addWidget(splitter, stretch=1)
+
+        # 将编辑器页面加入 page_stack
+        self._page_stack.addWidget(editor_page)
 
         # ================= 信号连接 =================
         self.toolbox_tree.itemDoubleClicked.connect(self._on_toolbox_double_clicked)
@@ -266,7 +278,8 @@ class ScriptTab(QWidget):
         self._record_timer = QElapsedTimer()
         self._record_timer.start()
         self._record_elapsed_before_pause = 0
-        self.last_record_time = 0.0
+        import time
+        self.last_record_time = time.time()  # 录制起始时间戳，用于计算第一次操作前的等待
         
         main_win = self.window()
         # 自动开启画面同步
@@ -329,12 +342,12 @@ class ScriptTab(QWidget):
         """停止录制（唯一解除遮罩的入口）"""
         if not self.is_recording:
             return
-        # 写入最后等待时间
-        if not self._recording_paused:
-            elapsed_ms = self._get_recording_elapsed_ms()
-            if elapsed_ms > 100 and self.last_record_time > 0:
-                sleep_sec = round(elapsed_ms / 1000.0, 1)
-                sleep_node = ActionNode(action_type="sleep", params={"seconds": sleep_sec})
+        # 写入最后等待时间（使用 time.time 与 last_record_time 做差，与 _on_record_click_done 保持统一）
+        if not self._recording_paused and self.last_record_time > 0:
+            import time
+            diff = round(time.time() - self.last_record_time, 1)
+            if diff > 0.5:
+                sleep_node = ActionNode(action_type="sleep", params={"seconds": diff})
                 self.current_model.actions.append(sleep_node)
                 from PyQt6.QtWidgets import QListWidgetItem
                 item = QListWidgetItem()
@@ -372,11 +385,43 @@ class ScriptTab(QWidget):
         if self._recording_paused:
             return self._record_elapsed_before_pause
         return self._record_elapsed_before_pause + self._record_timer.elapsed()
+    def _check_recording_resolution(self, device_id: str) -> bool:
+        """
+        录制前分辨率门禁检查：比对当前预览设备分辨率与脚本绑定分辨率。
+        返回 True 表示通过，False 表示不匹配并已弹窗拦截。
+        """
+        script_res = getattr(self.current_model.config, 'resolution', None)
+        if not script_res or script_res == "unknown":
+            return True  # 脚本没有绑定分辨率，不拦截
+        
+        try:
+            from adb_utils import get_resolution
+            w, h = get_resolution(device_id)
+            if w <= 0 or h <= 0:
+                return True  # 无法获取当前设备分辨率，放行
+            current_res = f"{w}x{h}"
+        except Exception:
+            return True  # 获取失败，不影响录制
+        
+        if current_res != script_res:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self, "分辨率不匹配 — 拒绝录制",
+                f"当前预览设备 [{device_id}] 的分辨率为：{current_res}\n"
+                f"脚本「{self.current_model.name}」绑定分辨率为：{script_res}\n\n"
+                f"分辨率不一致将导致找图失败，请切换到匹配的设备后再录制。"
+            )
+            return False
+        return True
 
     def on_recorded_click(self, device_id: str, x: int, y: int):
         """主窗口拦截点击后，调用的录制钩子"""
         # 暂停状态下忽略点击
         if self._recording_paused:
+            return
+        
+        # 分辨率门禁检查
+        if not self._check_recording_resolution(device_id):
             return
         
         # 最小间隔保护 1 秒
@@ -388,22 +433,6 @@ class ScriptTab(QWidget):
             if hasattr(main_win, '_append_log'):
                 main_win._append_log("⚠️ 操作过快（<1s），已忽略。过快点击可能导致识图失败。")
             return
-        
-        # 自动插入 sleep：记录上一次操作到现在的等待时间
-        elapsed_ms = self._get_recording_elapsed_ms()
-        if elapsed_ms > 100 and self.last_record_time > 0:
-            sleep_sec = round(elapsed_ms / 1000.0, 1)
-            sleep_node = ActionNode(action_type="sleep", params={"seconds": sleep_sec})
-            self.current_model.actions.append(sleep_node)
-            from PyQt6.QtWidgets import QListWidgetItem
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, sleep_node.id)
-            self.action_list.addItem(item)
-        
-        # 重置计时器
-        self._record_timer.start()
-        self._record_elapsed_before_pause = 0
-        self.last_record_time = now
         
         # 启动后台线程执行 ADB 截图 + 点击
         worker = _RecordClickWorker(
@@ -425,6 +454,10 @@ class ScriptTab(QWidget):
         if self._recording_paused:
             return
         
+        # 分辨率门禁检查
+        if not self._check_recording_resolution(device_id):
+            return
+        
         # 最小间隔保护 1 秒
         import time
         now = time.time()
@@ -434,20 +467,18 @@ class ScriptTab(QWidget):
                 main_win._append_log("⚠️ 操作过快（<1s），已忽略。")
             return
         
-        # 自动插入 sleep
-        elapsed_ms = self._get_recording_elapsed_ms()
-        if elapsed_ms > 100 and self.last_record_time > 0:
-            sleep_sec = round(elapsed_ms / 1000.0, 1)
-            sleep_node = ActionNode(action_type="sleep", params={"seconds": sleep_sec})
-            self.current_model.actions.append(sleep_node)
-            from PyQt6.QtWidgets import QListWidgetItem
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, sleep_node.id)
-            self.action_list.addItem(item)
+        # 自动插入 sleep（使用 time.time 做差，与点击录制保持统一）
+        if self.last_record_time > 0:
+            diff = round(now - self.last_record_time, 1)
+            if diff > 0.5:
+                sleep_node = ActionNode(action_type="sleep", params={"seconds": diff})
+                self.current_model.actions.append(sleep_node)
+                from PyQt6.QtWidgets import QListWidgetItem
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, sleep_node.id)
+                self.action_list.addItem(item)
         
-        # 重置计时器
-        self._record_timer.start()
-        self._record_elapsed_before_pause = 0
+        # 更新时间戳
         self.last_record_time = now
         
         # 创建 swipe 动作节点
@@ -465,13 +496,7 @@ class ScriptTab(QWidget):
         list_item.setData(Qt.ItemDataRole.UserRole, node.id)
         self.action_list.addItem(list_item)
         self._refresh_action_list_text()
-        
-        # 后台执行 ADB swipe 测试/同步
-        import threading
-        def _do_swipe():
-            from adb_utils import swipe as adb_swipe
-            adb_swipe(device_id, x1, y1, x2, y2, duration_ms)
-        threading.Thread(target=_do_swipe, daemon=True).start()
+        # 注意：不再执行后台 ADB swipe，因为用户的滑动已通过 Scrcpy 实时送达设备
 
     def on_recorded_system_action(self, action_type: str):
         """主窗口触发系统按钮后，调用的录制钩子"""
@@ -525,12 +550,45 @@ class ScriptTab(QWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "提示", f"项目「{name}」已存在，请换个名称。")
             return
+
+        # 从主窗口获取当前预览区所属设备的真实分辨率
+        main_win = self.window()
+        device_id = getattr(main_win, 'device_combo', None)
+        device_id = device_id.currentText() if device_id else ""
+        
+        resolution_tag = "unknown"
+        if device_id:
+            try:
+                from adb_utils import get_resolution
+                w, h = get_resolution(device_id)
+                if w > 0 and h > 0:
+                    resolution_tag = f"{w}x{h}"
+            except Exception:
+                pass
+        
+        # 弹窗确认分辨率绑定
+        from PyQt6.QtWidgets import QMessageBox
+        if resolution_tag == "unknown":
+            QMessageBox.warning(self, "无法获取分辨率",
+                "未检测到有效设备分辨率，请先连接设备并在顶部选择。")
+            return
+        
+        reply = QMessageBox.question(
+            self, "确认脚本分辨率",
+            f"当前预览设备 [{device_id}] 的分辨率为：\n\n"
+            f"    📐  {resolution_tag}\n\n"
+            f"是否基于此分辨率创建脚本项目「{name}」？\n\n"
+            f"⚠️ 注意：后续脚本执行时，设备分辨率必须与此一致，\n"
+            f"否则将无法正常运行。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
         # 创建新模型并立即保存（创建目录结构）
         self.current_model = ScriptModel(name=name)
         self.current_model.project_dir = project_dir
-        # 自动获取当前模拟器分辨率
-        from config import get_resolution_tag
-        self.current_model.config.resolution = get_resolution_tag()
+        self.current_model.config.resolution = resolution_tag
         self.current_model.save()  # 自动创建 Temp/ 和 Pictures/
         self._reload_action_list_ui()
         self._refresh_script_combo(select=name)
@@ -728,11 +786,16 @@ class ScriptTab(QWidget):
 
     def _create_props_widget(self, node) -> QWidget:
         """根据 ActionNode 类型动态生成参数配置面板（统一调用 action_props）"""
-        from PyQt6.QtWidgets import QFormLayout, QLineEdit
+        from PyQt6.QtWidgets import QFormLayout, QLineEdit, QVBoxLayout
         from gui.action_props import build_action_props, append_comment_row
 
-        widget = QWidget()
-        layout = QFormLayout(widget)
+        wrapper = QWidget()
+        outer = QVBoxLayout(wrapper)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        form_widget = QWidget()
+        layout = QFormLayout(form_widget)
         
         def update_param(key, value):
             node.params[key] = value
@@ -744,6 +807,7 @@ class ScriptTab(QWidget):
             "main_win": main_win,
             "pictures_dir": self.current_model.pictures_dir if self.current_model else "",
             "internalize_fn": self.current_model.internalize_image if self.current_model else None,
+            "on_open_gallery": self._open_gallery,
         }
         
         # 统一分派构建
@@ -768,7 +832,73 @@ class ScriptTab(QWidget):
         del_btn.clicked.connect(lambda: self._delete_current_action(node.id))
         layout.addRow(del_btn)
 
-        return widget
+        outer.addWidget(form_widget)
+        outer.addStretch(1)  # 将内容推到顶部，防止均匀拉伸
+        return wrapper
+
+    def _open_gallery(self, node, mode="single", param_key="template"):
+        """统一图库入口：在整个 Tab 区域显示图库
+        
+        Args:
+            node: 当前 ActionNode
+            mode: "single" 单选 / "multi" 多选
+            param_key: 写回参数的键名
+        """
+        if not self.current_model:
+            return
+        
+        from gui.template_gallery_dialog import TemplateGalleryWidget
+        
+        pictures_dir = self.current_model.pictures_dir
+        
+        # 构造当前模板列表
+        if mode == "single":
+            tpl_val = node.params.get(param_key, "")
+            current_templates = [{"template": tpl_val}] if tpl_val else []
+        else:
+            current_templates = node.params.get(param_key, [])
+        
+        gallery = TemplateGalleryWidget(pictures_dir, current_templates, mode=mode, parent=self)
+        
+        # 绑定 ScreenshotWidget
+        main_win = self.window()
+        sw = getattr(main_win, 'screenshot_widget', None)
+        if sw:
+            gallery.bind_screenshot_widget(sw)
+        
+        prev_row = self.action_list.currentRow()
+        
+        idx = self._page_stack.addWidget(gallery)
+        self._page_stack.setCurrentIndex(idx)
+        
+        def _on_gallery_closed(updated_templates):
+            self._page_stack.setCurrentIndex(0)
+            self._page_stack.removeWidget(gallery)
+            gallery.deleteLater()
+            
+            if mode == "single":
+                new_val = updated_templates[0].get("template", "") if updated_templates else ""
+                old_val = node.params.get(param_key, "")
+                if new_val != old_val:
+                    node.params[param_key] = new_val
+                    self.current_model.save()
+                    if hasattr(main_win, '_append_log'):
+                        main_win._append_log(f"📂 已选择模板: {new_val}")
+            else:
+                old_templates = node.params.get(param_key, [])
+                changed = (len(updated_templates) != len(old_templates) or
+                           any(u.get("template") != o.get("template")
+                               for u, o in zip(updated_templates, old_templates)))
+                if changed:
+                    node.params[param_key] = updated_templates
+                    self.current_model.save()
+            
+            # 刷新列表文本并恢复选中行
+            self._refresh_action_list_text()
+            if prev_row >= 0 and prev_row < self.action_list.count():
+                self.action_list.setCurrentRow(prev_row)
+        
+        gallery.closed.connect(_on_gallery_closed)
         
     def _upgrade_to_find_and_tap(self, node):
         """将 tap 升级为 find_and_tap，自动计算点击偏移量"""
@@ -831,7 +961,7 @@ class ScriptTab(QWidget):
             
             node.type = "find_and_tap"
             node.params = {
-                "template": save_path,
+                "template": os.path.basename(save_path),  # 只存文件名，与其他指令保持一致
                 "threshold": 0.9,
                 "timeout": 3.0,
                 "offset_x": offset_x,

@@ -33,7 +33,7 @@ class BotWorker(QThread):
 
     def __init__(self, device_id, script_model: ScriptModel = None,
                  loop_mode: bool = False, enabled_templates: list = None,
-                 parent=None):
+                 adapter=None, parent=None):
         """
         初始化工作线程。
 
@@ -42,6 +42,7 @@ class BotWorker(QThread):
             script_model (ScriptModel): JSON 解析后的动作对象
             loop_mode (bool): 是否以循环模式运行
             enabled_templates (list): 循环模式下启用的模板文件名列表
+            adapter: 可选的自定义设备驱动
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -49,6 +50,7 @@ class BotWorker(QThread):
         self.script_model = script_model or ScriptModel()
         self.loop_mode = loop_mode
         self.enabled_templates = enabled_templates
+        self.adapter = adapter
 
         # 暂停控制事件：set=运行, clear=暂停
         self._pause_event = threading.Event()
@@ -71,7 +73,8 @@ class BotWorker(QThread):
             device_id=self.device_id,
             pause_event=self._pause_event,
             interrupt_check=self.isInterruptionRequested,
-            callbacks=callbacks
+            callbacks=callbacks,
+            adapter=self.adapter
         )
         
         if self.loop_mode:

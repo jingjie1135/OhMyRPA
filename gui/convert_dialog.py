@@ -490,10 +490,9 @@ class ConvertDialog(QDialog):
             snapshot_path = action.params.get("snapshot", "")
             if not snapshot_path or not os.path.exists(snapshot_path):
                 continue
-            q_img = QImage(snapshot_path)
-            if q_img.isNull():
-                continue
-            cv_img = _qimage_to_cv(q_img)
+            # 直接用 OpenCV 读取快照（避免 QImage 格式转换导致颜色精度损失）
+            img_array = np.fromfile(snapshot_path, dtype=np.uint8)
+            cv_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             if cv_img is None:
                 continue
 
@@ -567,6 +566,13 @@ class ConvertDialog(QDialog):
             'type': 'multi_match',
             'templates': templates,
         }
+        
+        # 批量保存结束后，清理一下该目录的图像匹配缓存
+        try:
+            import image_engine
+            image_engine.clear_cache(pictures_dir)
+        except Exception:
+            pass
 
         QMessageBox.information(
             self, "转换完成",

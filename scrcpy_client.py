@@ -246,6 +246,10 @@ class ScrcpyClient:
         self._block_frame = block_frame
         self._control_only = control_only
 
+        import random
+        self._scid = f"{random.randint(0, 0x7FFFFFFF):08x}"
+        self._socket_name = f"scrcpy_{self._scid}"
+
         # 连接状态
         self.alive = False
         self.device_name: Optional[str] = None
@@ -327,16 +331,17 @@ class ScrcpyClient:
             except Exception:
                 pass
 
-        # 清理 adb reverse
+        # 清理个人的 adb reverse 隧道
         try:
             import config
             import subprocess
             import sys
             _flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            subprocess.run(
-                [config.ADB_PATH, "-s", self._device_id, "reverse", "--remove-all"],
-                capture_output=True, timeout=5, creationflags=_flags
-            )
+            if hasattr(self, '_socket_name'):
+                subprocess.run(
+                    [config.ADB_PATH, "-s", self._device_id, "reverse", "--remove", f"localabstract:{self._socket_name}"],
+                    capture_output=True, timeout=5, creationflags=_flags
+                )
         except Exception:
             pass
 
@@ -379,17 +384,11 @@ class ScrcpyClient:
         )
         logger.info("[%s] push: %s (rc=%d)", self._device_id, r.stdout.strip(), r.returncode)
 
-        # Step 2: 清理残留环境
+        # Step 2: 清理当前实例专属的反向隧道残留（不可清理全局，以防干掉同设备的其他 scrcpy 实例）
         subprocess.run(
-            [adb_path, "-s", self._device_id, "reverse", "--remove-all"],
+            [adb_path, "-s", self._device_id, "reverse", "--remove", f"localabstract:{self._socket_name}"],
             capture_output=True, timeout=5, creationflags=_flags
         )
-        subprocess.run(
-            [adb_path, "-s", self._device_id, "shell",
-             "pkill", "-f", "scrcpy"],
-            capture_output=True, timeout=5, creationflags=_flags
-        )
-        time.sleep(1)  # 等待进程完全退出
 
         # Step 3: 电脑端监听本地端口（TCP 服务器）
         self._listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -402,10 +401,10 @@ class ScrcpyClient:
         local_port = self._listen_socket.getsockname()[1]
         logger.info("[%s] 本地监听端口: %d", self._device_id, local_port)
 
-        # Step 4: adb reverse（设备端 localabstract:scrcpy → 电脑端 TCP 端口）
+        # Step 4: adb reverse（设备端 localabstract:scrcpy_{scid} → 电脑端 TCP 端口）
         result = subprocess.run(
             [adb_path, "-s", self._device_id, "reverse",
-             "localabstract:scrcpy", f"tcp:{local_port}"],
+             f"localabstract:{self._socket_name}", f"tcp:{local_port}"],
             capture_output=True, text=True, timeout=5, creationflags=_flags
         )
         if result.returncode != 0:
@@ -426,6 +425,7 @@ class ScrcpyClient:
             "app_process", "/",
             "com.genymobile.scrcpy.Server",
             "3.3.3",                          # server 版本
+            f"scid={self._scid}",
             "log_level=info",
             f"video=false" if self._control_only else f"video_bit_rate={self._bitrate}",
             f"max_size={self._max_width}",
@@ -445,7 +445,8 @@ class ScrcpyClient:
 
     def _find_server_jar(self) -> str:
         """查找 scrcpy-server 文件路径（支持 v3.x 无扩展名格式和旧 .jar 格式）。"""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        from config import BASE_DIR
+        base_dir = BASE_DIR
 
         # 优先级 1：v3.3.3 格式（scrcpy-server，无扩展名）
         server_v3 = os.path.join(base_dir, "scrcpy-server")

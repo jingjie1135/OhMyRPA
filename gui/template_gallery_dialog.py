@@ -1,25 +1,30 @@
 """
 模板图库管理控件（嵌入式，非弹窗）。
 
-嵌入到循环脚本 Tab 的属性面板中，复刻主图库的 FlowLayout 网格。
-利用主窗口已有的 ScreenshotWidget 进行截图框选添加模板。
+嵌入到脚本 Tab 的属性面板中，复刻主图库的 FlowLayout 网格。
+支持两种模式：
+  - "multi" 多选模式（multi_match 指令用）
+  - "single" 单选模式（find_and_tap / wait_image 指令用）
+内置找图测试按钮，可直接在当前截图上匹配选中的模板。
 """
 
 import os
 import re
-import shutil
+
+import cv2
+import numpy as np
 
 from PyQt6.QtCore import Qt, QRect, QSize, QPoint, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLayout, QSizePolicy,
     QLabel, QPushButton, QScrollArea, QMessageBox,
-    QCheckBox, QFileDialog,
+    QCheckBox, QFileDialog, QRadioButton,
 )
 
 from gui.constants import COLOR_DANGER, create_font
 
-# 缩略图固定尺寸（与主图库一致）
+# 缩略图固定尺寸
 THUMB_SIZE = 70
 CARD_SPACING = 2
 
@@ -96,12 +101,16 @@ def _display_name(filename):
 # =================== ImageCard ===================
 
 class _ImageCard(QWidget):
-    """单张模板图片卡片：缩略图 + 勾选框 + 名称。"""
+    """单张模板图片卡片：缩略图 + 选择控件 + 名称。"""
 
-    def __init__(self, fpath, parent=None):
+    # 卡片被点击时发出信号（仅单选模式需要）
+    clicked = pyqtSignal()
+
+    def __init__(self, fpath, mode="multi", parent=None):
         super().__init__(parent)
         self.fpath = fpath
         self.filename = os.path.basename(fpath)
+        self._mode = mode
         self.setFixedSize(THUMB_SIZE + 4, THUMB_SIZE + 30)
 
         layout = QVBoxLayout(self)
@@ -124,21 +133,38 @@ class _ImageCard(QWidget):
         thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         thumb.setGeometry(2, 2, THUMB_SIZE, THUMB_SIZE)
 
-        # 勾选框
-        self.checkbox = QCheckBox(img_container)
-        self.checkbox.setGeometry(4, 4, 18, 18)
-        self.checkbox.setStyleSheet("""
-            QCheckBox::indicator {
-                width: 15px; height: 15px;
-                background: white;
-                border: 1px solid #999;
-            }
-            QCheckBox::indicator:checked {
-                image: url(none);
-                background: #409eff;
-                border-color: #409eff;
-            }
-        """)
+        # 选择控件：多选用 QCheckBox，单选用 QRadioButton
+        # 选择控件：多选用 QCheckBox，单选用 QRadioButton
+        if mode == "single":
+            self.selector = QRadioButton(img_container)
+            self.selector.setGeometry(4, 4, 18, 18)
+            self.selector.setStyleSheet("""
+                QRadioButton::indicator {
+                    width: 15px; height: 15px;
+                    background: white;
+                    border: 1px solid #999;
+                    border-radius: 8px;
+                }
+                QRadioButton::indicator:checked {
+                    background: #409eff;
+                    border-color: #409eff;
+                }
+            """)
+        else:
+            self.selector = QCheckBox(img_container)
+            self.selector.setGeometry(4, 4, 18, 18)
+            self.selector.setStyleSheet("""
+                QCheckBox::indicator {
+                    width: 15px; height: 15px;
+                    background: white;
+                    border: 1px solid #999;
+                }
+                QCheckBox::indicator:checked {
+                    image: url(none);
+                    background: #409eff;
+                    border-color: #409eff;
+                }
+            """)
 
         layout.addWidget(img_container, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -150,9 +176,23 @@ class _ImageCard(QWidget):
         name_label.setMaximumHeight(20)
         layout.addWidget(name_label)
 
+    def is_checked(self):
+        """统一接口：获取是否选中"""
+        if self._mode == "single":
+            return self.selector.isChecked()
+        return self.selector.isChecked()
+
+    def set_checked(self, checked):
+        """统一接口：设置选中状态"""
+        self.selector.setChecked(checked)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.checkbox.setChecked(not self.checkbox.isChecked())
+            if self._mode == "single":
+                # 单选模式：通过信号让父级处理互斥
+                self.clicked.emit()
+            else:
+                self.selector.setChecked(not self.selector.isChecked())
 
 
 # =================== 嵌入式图库控件 ===================
@@ -161,17 +201,23 @@ class TemplateGalleryWidget(QWidget):
     """
     嵌入式模板图库控件，用于替换属性面板内容。
 
+    mode:
+        "multi" — 多选模式（checkbox），返回文件名列表
+        "single" — 单选模式（radio），返回单元素列表
+
     信号:
         closed(list): 关闭时发出，携带更新后的模板列表
     """
     closed = pyqtSignal(list)
 
-    def __init__(self, pictures_dir: str, current_templates: list, parent=None):
+    def __init__(self, pictures_dir: str, current_templates: list,
+                 mode: str = "multi", parent=None):
         super().__init__(parent)
         self.pictures_dir = pictures_dir
         self._original_templates = current_templates or []
+        self._mode = mode
         self._cards = []
-        # 保存关联的 ScreenshotWidget 引用（用于恢复 custom_save_dir）
+        # 保存关联的 ScreenshotWidget 引用
         self._screenshot_widget = None
         self._prev_save_dir = None
 
@@ -186,7 +232,11 @@ class TemplateGalleryWidget(QWidget):
         # ===== 顶部：标题 + 返回按钮 =====
         top_bar = QHBoxLayout()
 
-        title = QLabel("📂 模板图库管理")
+        if self._mode == "single":
+            title_text = "📂 选择模板图片"
+        else:
+            title_text = "📂 模板图库管理"
+        title = QLabel(title_text)
         title.setFont(create_font(10, bold=True))
         top_bar.addWidget(title)
         top_bar.addStretch()
@@ -201,7 +251,10 @@ class TemplateGalleryWidget(QWidget):
         layout.addLayout(top_bar)
 
         # ===== 提示 =====
-        hint = QLabel("📷 在左侧预览区框选区域可直接添加模板")
+        hint_text = "📷 在左侧预览区框选区域可直接添加模板"
+        if self._mode == "single":
+            hint_text = "📷 点击选择一张模板，或在左侧预览区框选添加"
+        hint = QLabel(hint_text)
         hint.setStyleSheet("color: #555; padding: 4px; background: #f0f4f8; border-radius: 4px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -209,31 +262,41 @@ class TemplateGalleryWidget(QWidget):
         # ===== 工具栏 =====
         toolbar = QHBoxLayout()
 
-        self.refresh_btn = QPushButton("🔄 刷新")
+        self.refresh_btn = QPushButton("🔄")
         self.refresh_btn.setFont(create_font())
-        self.refresh_btn.setFixedSize(70, 28)
+        self.refresh_btn.setFixedSize(36, 28)
+        self.refresh_btn.setToolTip("刷新图库")
         self.refresh_btn.clicked.connect(self._load_gallery)
         toolbar.addWidget(self.refresh_btn)
 
-        self.count_label = QLabel("共 0 张模板")
+        self.count_label = QLabel("共 0 张")
         self.count_label.setFont(create_font())
         toolbar.addWidget(self.count_label)
 
         toolbar.addStretch()
 
+        # 找图测试按钮（所有模式通用）
+        test_btn = QPushButton("🧪 找图测试")
+        test_btn.setFont(create_font())
+        test_btn.setFixedSize(90, 28)
+        test_btn.setToolTip("在当前截图上测试选中模板的匹配度")
+        test_btn.clicked.connect(self._on_test_match)
+        toolbar.addWidget(test_btn)
+
         # 添加图片
-        add_btn = QPushButton("➕ 添加")
+        add_btn = QPushButton("➕")
         add_btn.setFont(create_font())
-        add_btn.setFixedSize(70, 28)
-        add_btn.setToolTip("从文件系统选择图片添加")
+        add_btn.setFixedSize(36, 28)
+        add_btn.setToolTip("从文件系统添加图片")
         add_btn.clicked.connect(self._add_from_file)
         toolbar.addWidget(add_btn)
 
         # 删除选中
-        del_btn = QPushButton("🗑 删除")
+        del_btn = QPushButton("🗑")
         del_btn.setFont(create_font())
-        del_btn.setFixedSize(70, 28)
-        del_btn.setStyleSheet(f"color: {COLOR_DANGER}; border-color: {COLOR_DANGER};")
+        del_btn.setFixedSize(36, 28)
+        del_btn.setToolTip("删除选中的模板图片")
+        del_btn.setStyleSheet(f"color: {COLOR_DANGER};")
         del_btn.clicked.connect(self._delete_selected)
         toolbar.addWidget(del_btn)
 
@@ -282,7 +345,7 @@ class TemplateGalleryWidget(QWidget):
                 w.deleteLater()
 
         if not os.path.isdir(self.pictures_dir):
-            self.count_label.setText("共 0 张模板")
+            self.count_label.setText("共 0 张")
             return
 
         # 构建已有模板的文件名集合
@@ -294,18 +357,90 @@ class TemplateGalleryWidget(QWidget):
             if f.lower().endswith(exts)
         ])
 
-        self.count_label.setText(f"共 {len(files)} 张模板")
+        self.count_label.setText(f"共 {len(files)} 张")
 
         for fname in files:
             fpath = os.path.join(self.pictures_dir, fname)
-            card = _ImageCard(fpath)
-            # 在原模板列表中的勾选，新添加的也默认勾选
-            if enabled_set:
-                card.checkbox.setChecked(fname in enabled_set)
+            card = _ImageCard(fpath, mode=self._mode)
+
+            if self._mode == "single":
+                # 单选模式：默认选中当前模板
+                if enabled_set:
+                    card.set_checked(fname in enabled_set)
+                # 点击时互斥选中
+                card.clicked.connect(lambda c=card: self._on_single_select(c))
             else:
-                card.checkbox.setChecked(True)
+                # 多选模式：已有模板勾选
+                if enabled_set:
+                    card.set_checked(fname in enabled_set)
+                else:
+                    card.set_checked(True)
+
             self._cards.append(card)
             self._flow_layout.addWidget(card)
+
+    def _on_single_select(self, selected_card):
+        """单选模式：点击一个卡片，取消其他所有选中"""
+        for card in self._cards:
+            card.set_checked(card is selected_card)
+
+    # ==================== 找图测试 ====================
+
+    def _on_test_match(self):
+        """对选中的模板在当前截图上执行找图匹配"""
+        selected = self._get_selected_paths()
+        if not selected:
+            QMessageBox.information(self, "提示", "请先选中要测试的模板图片")
+            return
+
+        # 获取截图
+        sw = self._screenshot_widget
+        if sw is None or sw._source_image is None:
+            QMessageBox.information(self, "提示", "请先截图或开启实时同步")
+            return
+
+        # QImage → OpenCV BGR
+        q_img = sw._source_image
+        q_img_rgb = q_img.convertToFormat(QImage.Format.Format_RGB888)
+        w, h = q_img_rgb.width(), q_img_rgb.height()
+        ptr = q_img_rgb.bits()
+        ptr.setsize(h * w * 3)
+        arr = np.array(ptr).reshape(h, w, 3)
+        screen_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+        # 加载选中的模板（直接用 OpenCV 读取，保证零损失）
+        templates = []
+        for fpath in selected:
+            img_array = np.fromfile(fpath, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            if img is not None:
+                name = _display_name(os.path.basename(fpath))
+                templates.append((name, img))
+
+        if not templates:
+            QMessageBox.warning(self, "错误", "所选模板均无法读取")
+            return
+
+        from image_engine import match_all
+        results = match_all(screen_bgr, templates)
+
+        sw.set_y_offset(0)
+        sw.update_matches(results)
+
+        # 输出日志
+        main_win = self.window()
+        log_fn = getattr(main_win, '_append_log', None)
+        if log_fn:
+            if results:
+                log_fn(f"🧪 找图测试: 匹配到 {len(results)} 个结果")
+                for name, cx, cy, score in results:
+                    log_fn(f"  ▸ {name} → ({cx}, {cy}) 匹配度: {score:.3f}")
+            else:
+                log_fn("🧪 找图测试: 未匹配到任何结果")
+
+    def _get_selected_paths(self):
+        """获取选中卡片的文件路径列表"""
+        return [c.fpath for c in self._cards if c.is_checked()]
 
     # ==================== 添加/删除 ====================
 
@@ -317,6 +452,7 @@ class TemplateGalleryWidget(QWidget):
         )
         if not files:
             return
+        import shutil
         os.makedirs(self.pictures_dir, exist_ok=True)
         added = 0
         for src in files:
@@ -332,9 +468,9 @@ class TemplateGalleryWidget(QWidget):
 
     def _delete_selected(self):
         """删除勾选的模板图片"""
-        selected = [c for c in self._cards if c.checkbox.isChecked()]
+        selected = [c for c in self._cards if c.is_checked()]
         if not selected:
-            QMessageBox.information(self, "提示", "请先勾选要删除的图片")
+            QMessageBox.information(self, "提示", "请先选中要删除的图片")
             return
         ret = QMessageBox.question(
             self, "确认删除",
@@ -361,11 +497,11 @@ class TemplateGalleryWidget(QWidget):
         self.closed.emit(templates)
 
     def _build_template_list(self):
-        """构建更新后的模板列表（仅包含勾选的）"""
+        """构建更新后的模板列表（仅包含选中的）"""
         orig_lookup = {t.get("template", ""): t for t in self._original_templates}
         templates = []
         for card in self._cards:
-            if not card.checkbox.isChecked():
+            if not card.is_checked():
                 continue
             fname = card.filename
             if fname in orig_lookup:

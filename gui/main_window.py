@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self._worker = None             # 工作线程引用
+        self._workers = []              # 并发执行的多个工作线程
         self._runtime_config = None     # 运行时参数引用
         self._last_picked_coord = None  # 最近一次拾取的坐标
         self._screencap_worker = None   # 截图后台线程
@@ -655,19 +655,36 @@ class MainWindow(QMainWindow):
                     return
 
         self._runtime_config = self.script_tab.get_runtime_config()
-        self._worker = BotWorker(
-            device_id, script_model=script_model,
-            loop_mode=is_loop_mode, enabled_templates=enabled_templates,
-            parent=self
-        )
+        self._workers = []
 
-        self._worker.log_signal.connect(self._append_log)
-        self._worker.screenshot_signal.connect(self.screenshot_widget.update_screenshot)
-        self._worker.match_signal.connect(self.screenshot_widget.update_matches)
-        self._worker.status_signal.connect(self._update_status)
-        self._worker.finished_signal.connect(self._on_worker_finished)
+        from device_adapter import HybridDeviceAdapter
 
-        self._worker.start()
+        target_adapters = self._get_all_active_adapters()
+        for raw_adapter in target_adapters:
+            # 从适配器对象上获取设备 ID
+            d_id = getattr(raw_adapter, 'device_id', device_id)
+            # 提取现有的 Scrcpy client 连接，组装为混合适配器
+            scrcpy_client = getattr(raw_adapter, 'client', None)
+            hybrid_adapter = HybridDeviceAdapter(d_id, scrcpy_client=scrcpy_client)
+
+            worker = BotWorker(
+                d_id, script_model=script_model,
+                loop_mode=is_loop_mode, enabled_templates=enabled_templates,
+                adapter=hybrid_adapter, parent=self
+            )
+
+            worker.log_signal.connect(self._append_log)
+            # 视觉组件暂时只绑定主设备(下拉框选中的设备)用于预览，不渲染其他群控窗口的画面
+            if d_id == device_id:
+                worker.screenshot_signal.connect(self.screenshot_widget.update_screenshot)
+                worker.match_signal.connect(self.screenshot_widget.update_matches)
+                
+            worker.status_signal.connect(self._update_status)
+            worker.finished_signal.connect(self._on_worker_finished)
+
+            self._workers.append(worker)
+            worker.start()
+
         self._sync_timer.start(500)
 
         # UI 状态更新：按钮切换为停止模式
@@ -682,32 +699,46 @@ class MainWindow(QMainWindow):
 
     def _on_pause(self):
         """暂停/继续按钮。"""
-        if self._worker is None:
+        if not self._workers:
             return
 
-        if self._worker.is_paused():
-            self._worker.resume()
+        # 以列表中第一个 Worker 的状态为准进行全局翻转
+        if self._workers[0].is_paused():
+            for w in self._workers:
+                w.resume()
             self.pause_btn.setText("⏸ 暂停")
-            self._append_log("已恢复运行")
+            self._append_log("所有设备已恢复运行")
         else:
-            self._worker.pause()
+            for w in self._workers:
+                w.pause()
             self.pause_btn.setText("▶ 继续")
-            self._append_log("已暂停")
+            self._append_log("所有设备已暂停")
 
     def _do_stop(self):
         """停止工作线程（手册 §六资源保护）。"""
-        if self._worker is None:
+        if not self._workers:
             return
 
-        self._append_log("正在停止...")
-        self._worker.stop()
-        self._worker.wait(5000)
-        self._on_worker_finished()
+        self._append_log("正在停止所有运行中的设备...")
+        for w in self._workers:
+            w.stop()
+        
+        for w in self._workers:
+            w.wait(5000)
+            
+        # _on_worker_finished 会在单个完毕时被接连调用，这里只需触发即可
 
     def _on_worker_finished(self):
         """工作线程结束后的清理。"""
+        sender_worker = self.sender()
+        if sender_worker in self._workers:
+            self._workers.remove(sender_worker)
+            
+        # 只有当所有 worker 全部跑完后，才恢复 UI
+        if len(self._workers) > 0:
+            return
+
         self._sync_timer.stop()
-        self._worker = None
         self._runtime_config = None
 
         # 恢复按钮为启动状态
@@ -770,14 +801,16 @@ class MainWindow(QMainWindow):
 
     def _on_toggle_live_sync(self, checked):
         """实时同步开关：启动/停止持续截图与实时操纵。"""
-        if checked:
-            worker = self._ensure_screencap_worker()
-            if worker is None:
-                self._append_log("请先选择一个设备")
-                self.live_sync_btn.setChecked(False)
-                return
+        device_id = self.device_combo.currentText()
+        if not device_id:
+            self.live_sync_btn.setChecked(False)
+            self._append_log("请先选择一个设备")
+            return
 
-            worker.setup(self.device_combo.currentText(), continuous=True)
+        worker = self._ensure_screencap_worker()
+
+        if checked:
+            worker.setup(device_id, continuous=True)
             if not worker.isRunning():
                 worker.start()
 
@@ -813,13 +846,20 @@ class MainWindow(QMainWindow):
     def _get_all_active_adapters(self):
         """获取所有存活的可执行适配器（用于群控）。"""
         adapters = []
+        seen_devices = set()
+        
         # 主同步设备
-        if getattr(self.screenshot_widget, '_scrcpy_adapter', None) and self.screenshot_widget._scrcpy_adapter.supports_touch:
-            adapters.append(self.screenshot_widget._scrcpy_adapter)
+        main_adapter = getattr(self.screenshot_widget, '_scrcpy_adapter', None)
+        if main_adapter and main_adapter.supports_touch:
+            adapters.append(main_adapter)
+            seen_devices.add(main_adapter.device_id)
+            
         # 群控的控制通道设备
         for device_id, adapter in self._group_adapters.items():
-            if adapter and adapter.supports_touch:
+            if adapter and adapter.supports_touch and device_id not in seen_devices:
                 adapters.append(adapter)
+                seen_devices.add(device_id)
+                
         # 如果既没有同步也没有群控，退化为仅在当前 ADB 设备上进行单控
         if not adapters:
             single = self._get_active_adapter()
@@ -885,10 +925,11 @@ class MainWindow(QMainWindow):
 
     def _update_ui_scrcpy_count(self):
         """更新 UI 上的 Scrcpy 连接数"""
-        count = len(self._group_adapters)
-        if hasattr(self.screenshot_widget, '_scrcpy_adapter') and self.screenshot_widget._scrcpy_adapter and self.screenshot_widget._scrcpy_adapter.supports_touch:
-            count += 1
-        self._update_scrcpy_count(count)
+        active_devices = set(self._group_adapters.keys())
+        main_adapter = getattr(self.screenshot_widget, '_scrcpy_adapter', None)
+        if main_adapter and main_adapter.supports_touch:
+            active_devices.add(main_adapter.device_id)
+        self._update_scrcpy_count(len(active_devices))
 
     def _on_action_back(self):
         adapter = self._get_active_adapter()
@@ -998,9 +1039,15 @@ class MainWindow(QMainWindow):
         if self.live_sync_btn.isChecked():
             self.live_sync_btn.setChecked(False)
             self._on_toggle_live_sync(False)
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.stop()
-            self._worker.wait(3000)
+        
+        # Stop all bot workers
+        if hasattr(self, '_workers') and self._workers: # Check if _workers exists and is not empty
+            for worker in self._workers:
+                if worker.isRunning():
+                    worker.stop()
+                    worker.wait(3000) # Wait for worker to finish
+            self._workers.clear() # Clear the list after stopping all
+
         if self._screencap_worker is not None and self._screencap_worker.isRunning():
             self._screencap_worker.requestInterruption()
             self._screencap_worker.wait(2000)

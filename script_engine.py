@@ -3,7 +3,7 @@ import os
 import cv2
 
 from script_model import ScriptModel, ActionNode
-from device_adapter import DeviceAdapter, AdbAdapter
+from device_adapter import DeviceAdapter, HybridDeviceAdapter
 import image_engine
 import template_meta
 
@@ -20,7 +20,7 @@ class ScriptEngine:
         self.callbacks = callbacks or {}
         
         # DeviceAdapter（DRY：统一设备交互入口）
-        self._adapter = adapter or AdbAdapter(device_id)
+        self._adapter = adapter or HybridDeviceAdapter(device_id)
         
         self.consecutive_fails = 0
         
@@ -260,13 +260,13 @@ class ScriptEngine:
             self._log(f"⚠️ 循环指令 [{action_type}] 尚未实现，已跳过。")
 
         elif action_type == "multi_match":
-            # 多模板匹配：截图 → 逐模板搜索 → 点击第一个命中的
+            # 多模板匹配：单次截图找出所有能匹配的任务，依次点击并执行子动作
             templates = p.get("templates", [])
             if not templates:
                 self._log("⚠️ 多图匹配指令无模板配置，跳过。")
                 return
             
-            self._log(f"🎯 多图匹配: {len(templates)} 个模板")
+            self._log(f"🎯 多图匹配: 尝试匹配 {len(templates)} 种模板")
             
             # 预加载所有模板
             all_loaded = []
@@ -289,35 +289,46 @@ class ScriptEngine:
             if 'on_screenshot' in self.callbacks:
                 self.callbacks['on_screenshot'](img)
             
-            hit_count = 0
+            hit_targets = []
             for tpl_info, target_tmpl in all_loaded:
                 threshold = tpl_info.get("threshold", 0.9)
                 matches = image_engine.match_all(img, target_tmpl, threshold)
-                if matches:
-                    name, cx, cy, score = matches[0]
+                for match in matches:
+                    hit_targets.append({
+                        "tpl_info": tpl_info,
+                        "match": match
+                    })
+
+            if hit_targets:
+                self._log(f"🔍 多图匹配: 共在画面中找到 {len(hit_targets)} 个目标，依次执行")
+                for hit in hit_targets:
+                    self._check_interrupt_and_pause()
+                    
+                    tpl_info = hit["tpl_info"]
+                    name, cx, cy, score = hit["match"]
+                    
                     # 从 meta.json 读取偏移量
                     tpl_fname = os.path.basename(tpl_info.get('template', ''))
                     meta = template_meta.get(self.model.pictures_dir, tpl_fname)
                     ox = meta.get("offset_x", 0)
                     oy = meta.get("offset_y", 0)
                     final_x, final_y = cx + ox, cy + oy
-                    self._log(f"✅ 多图匹配命中 [{tpl_info.get('template','')}] "
-                              f"分数={score:.2f}, 点击 ({final_x},{final_y})")
-                    self._adapter.tap(final_x, final_y)
-                    hit_count += 1
-                    if 'on_match' in self.callbacks:
-                        self.callbacks['on_match'](matches)
                     
-                    # 每次命中后执行子动作
+                    self._log(f"✅ 多图命中 [{tpl_fname}] "
+                              f"分数={score:.2f}, 当前点击 ({final_x},{final_y})")
+                    self._adapter.tap(final_x, final_y)
+                    
+                    if 'on_match' in self.callbacks:
+                        self.callbacks['on_match']([hit["match"]])
+                    
+                    # 每次命中后执行子动作（自带 0.5s 延迟）
                     for sub_dict in p.get("sub_actions", []):
                         self._check_interrupt_and_pause()
+                        time.sleep(0.5)
                         sub_node = ActionNode.from_dict(sub_dict)
                         self._execute_action(sub_node)
-            
-            if hit_count == 0:
-                self._log("🔍 多图匹配: 无命中")
             else:
-                self._log(f"🔍 多图匹配: 共命中 {hit_count} 个模板")
+                self._log("🔍 多图匹配: 画面中未检出任何匹配目标")
 
         else:
             self._log(f"⚠️ 未知指令类型: [{action_type}]，已跳过。")
@@ -336,103 +347,22 @@ class ScriptEngine:
             return p3
         return template
 
-    def _build_watch_rules(self, enabled_templates: list = None) -> list:
-        """
-        从 actions 列表构建 watch_rules。
-        每个 find_and_tap 作为一条 rule，其后续的 tap/sleep 直到下一个 find_and_tap 作为子动作。
-        enabled_templates: 可选白名单（模板文件名列表），为 None 则全部启用。
-        """
-        rules = []
-        current_rule = None
-        
-        for action in self.model.actions:
-            if action.type == "find_and_tap":
-                tpl = action.params.get("template", "")
-                tpl_name = os.path.basename(tpl)
-                # 白名单过滤
-                if enabled_templates is not None and tpl_name not in enabled_templates:
-                    current_rule = None
-                    continue
-                
-                tpl_path = self._resolve_template_path(tpl)
-                # 从 meta.json 读取偏移量
-                meta = template_meta.get(self.model.pictures_dir, tpl_name)
-                current_rule = {
-                    "template_path": tpl_path,
-                    "template_name": tpl_name,
-                    "threshold": action.params.get("threshold", 0.9),
-                    "offset_x": meta.get("offset_x", 0),
-                    "offset_y": meta.get("offset_y", 0),
-                    "sub_actions": [],
-                    "handled": False,
-                }
-                rules.append(current_rule)
-            
-            elif action.type == "multi_match":
-                # multi_match 节点：将 templates 数组展开为多条独立的 watch rule
-                templates = action.params.get("templates", [])
-                for tpl_info in templates:
-                    tpl = tpl_info.get("template", "")
-                    tpl_name = os.path.basename(tpl)
-                    # 白名单过滤
-                    if enabled_templates is not None and tpl_name not in enabled_templates:
-                        continue
-                    
-                    tpl_path = self._resolve_template_path(tpl)
-                    # 从 meta.json 读取偏移量
-                    meta = template_meta.get(self.model.pictures_dir, tpl_name)
-                    # 将嵌入的 sub_actions 转为 ActionNode 对象
-                    embedded_subs = [
-                        ActionNode.from_dict(sd)
-                        for sd in action.params.get("sub_actions", [])
-                    ]
-                    current_rule = {
-                        "template_path": tpl_path,
-                        "template_name": tpl_name,
-                        "threshold": tpl_info.get("threshold", 0.9),
-                        "offset_x": meta.get("offset_x", 0),
-                        "offset_y": meta.get("offset_y", 0),
-                        "sub_actions": embedded_subs,
-                        "handled": False,
-                        "_from_multi_match": True,
-                    }
-                    rules.append(current_rule)
-            
-            elif current_rule is not None and action.type in ("tap", "sleep", "swipe"):
-                # 归入当前 rule 的子动作
-                current_rule["sub_actions"].append(action)
-        
-        return rules
-
     def run_loop(self, enabled_templates: list = None):
         """
-        循环执行模式：截图 → 匹配 watch_rules → 执行 → 默认点击 → 循环。
-        enabled_templates: 启用的模板文件名列表，None 表示全部。
+        循环执行模式：按顺序执行所有步骤，执行完毕后等待间隔，进入下一轮。
+        每轮按 actions 列表顺序逐个执行，multi_match 等指令通过 _execute_action 统一调度。
         """
         cfg = self.model.config
         self._log(f"🔄 循环模式启动: {self.model.name}")
         self._log(f"   间隔={cfg.scan_interval}s, 最大循环={cfg.max_loops or '无限'}")
+        self._log(f"   共 {len(self.model.actions)} 个步骤")
         
         if not self._pre_flight_checks():
             return
         
-        # 构建 watch_rules
-        rules = self._build_watch_rules(enabled_templates)
-        if not rules:
-            self._log("⚠️ 没有可用的找图规则，循环模式无法启动。")
+        if not self.model.actions:
+            self._log("⚠️ 脚本没有任何步骤，循环模式无法启动。")
             return
-        
-        self._log(f"📋 已加载 {len(rules)} 条监视规则:")
-        for i, rule in enumerate(rules):
-            self._log(f"   {i+1}. [{rule['template_name']}] 阈值={rule['threshold']}")
-        
-        # 预加载全部模板（性能优化，避免每轮重复 I/O）
-        all_templates = []
-        template_dirs = set()
-        for rule in rules:
-            template_dirs.add(os.path.dirname(rule["template_path"]) or ".")
-        for td in template_dirs:
-            all_templates.extend(image_engine.load_templates(td))
         
         loop_count = 0
         
@@ -446,59 +376,12 @@ class ScriptEngine:
                     self._log(f"🏁 已达到最大循环次数 ({cfg.max_loops})，停止。")
                     break
                 
-                # 截图
-                img = self._adapter.get_frame()
-                if img is None:
-                    time.sleep(cfg.scan_interval)
-                    continue
+                self._log(f"🔄 ── 第 {loop_count} 轮 ──")
                 
-                if 'on_screenshot' in self.callbacks:
-                    self.callbacks['on_screenshot'](img)
-                
-                # 遍历所有规则进行匹配
-                any_matched = False
-                for rule in rules:
-                    if rule["handled"]:
-                        continue  # 本轮已处理，跳过
-                    
+                # 按顺序执行所有步骤
+                for action in self.model.actions:
                     self._check_interrupt_and_pause()
-                    
-                    # 查找该规则对应的已加载模板
-                    target_name = os.path.splitext(rule["template_name"])[0]
-                    target_tmpl = [t for t in all_templates if t[0] == target_name]
-                    if not target_tmpl:
-                        continue
-                    
-                    matches = image_engine.match_all(img, target_tmpl, rule["threshold"])
-                    if matches:
-                        name, cx, cy, score = matches[0]
-                        ox, oy = rule["offset_x"], rule["offset_y"]
-                        final_x, final_y = cx + ox, cy + oy
-                        self._log(f"🔄[{loop_count}] 命中 [{rule['template_name']}] "
-                                  f"匹配={score:.2f}, 点击 ({final_x},{final_y})")
-                        self._adapter.tap(final_x, final_y)
-                        any_matched = True
-                        rule["handled"] = True
-                        
-                        if 'on_match' in self.callbacks:
-                            self.callbacks['on_match'](matches)
-                        
-                        # 执行子动作
-                        for sub in rule["sub_actions"]:
-                            self._check_interrupt_and_pause()
-                            self._execute_action(sub)
-                
-                if not any_matched:
-                    # 全部已处理 或 无匹配 → 默认点击 + 清除标记
-                    if cfg.default_tap_x > 0 or cfg.default_tap_y > 0:
-                        self._log(f"🔄[{loop_count}] 无匹配，默认点击 "
-                                  f"({cfg.default_tap_x},{cfg.default_tap_y})")
-                        self._adapter.tap(cfg.default_tap_x, cfg.default_tap_y)
-                    else:
-                        self._log(f"🔄[{loop_count}] 无匹配，无默认坐标，等待下一轮")
-                    # 清除全部已处理标记，重新开始匹配
-                    for rule in rules:
-                        rule["handled"] = False
+                    self._execute_action(action)
                 
                 # 等待扫描间隔
                 wait_start = time.time()
@@ -514,3 +397,4 @@ class ScriptEngine:
             traceback.print_exc()
         
         self._log(f"🏁 循环模式结束，共执行 {loop_count} 轮。")
+

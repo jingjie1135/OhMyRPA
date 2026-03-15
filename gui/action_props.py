@@ -148,45 +148,60 @@ def build_swipe_props(layout: QFormLayout, node, update_fn, context: dict = None
 
 
 def build_find_and_tap_props(layout: QFormLayout, node, update_fn, context: dict = None):
-    """找图点击 — 属性面板"""
+    """找图点击 — 属性面板（使用图库选择模板）"""
     import template_meta
     ctx = context or {}
     pictures_dir = ctx.get("pictures_dir", "")
 
-    # 模板路径
     _raw_tpl = node.params.get("template", "")
-    edit_template = QLineEdit(_raw_tpl)
-    edit_template.setPlaceholderText("模板图片文件名")
 
-    # 偏移量控件（先创建，供模板变更回调引用）
+    # 当前模板显示 + 缩略图预览
+    tpl_display = _raw_tpl if _raw_tpl else "未选择"
+    tpl_label = QLabel(f"📄 {tpl_display}")
+    tpl_label.setStyleSheet("font-weight: bold;")
+    tpl_label.setWordWrap(True)
+    layout.addRow("模板:", tpl_label)
+
+    if _raw_tpl and pictures_dir:
+        tpl_path = os.path.join(pictures_dir, _raw_tpl)
+        if os.path.exists(tpl_path):
+            pixmap = QPixmap(tpl_path)
+            if not pixmap.isNull():
+                preview = QLabel()
+                preview.setPixmap(pixmap.scaled(
+                    100, 60,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                ))
+                layout.addRow(preview)
+
+    # 📂 选择模板按钮（打开单选图库）
+    gallery_fn = ctx.get("on_open_gallery")
+    if gallery_fn:
+        select_btn = QPushButton("📂 选择模板")
+        select_btn.setFixedHeight(26)
+        select_btn.clicked.connect(lambda: gallery_fn(node, "single", "template"))
+        layout.addRow(select_btn)
+
+    # 阈值
+    spin_thresh = QDoubleSpinBox()
+    spin_thresh.setRange(0.5, 1.0)
+    spin_thresh.setSingleStep(0.05)
+    spin_thresh.setValue(node.params.get("threshold", 0.9))
+    spin_thresh.valueChanged.connect(lambda v: update_fn("threshold", v))
+    layout.addRow("匹配阈值:", spin_thresh)
+
+    # 偏移量
     spin_ox = QSpinBox()
     spin_ox.setRange(-2000, 2000)
     spin_oy = QSpinBox()
     spin_oy.setRange(-2000, 2000)
 
-    # 从 meta.json 初始化偏移值
     if _raw_tpl and pictures_dir:
         meta = template_meta.get(pictures_dir, os.path.basename(_raw_tpl))
         spin_ox.setValue(meta.get("offset_x", 0))
         spin_oy.setValue(meta.get("offset_y", 0))
 
-    # 模板变更时自动加载 meta.json 偏移量
-    def _on_template_changed(text):
-        update_fn("template", text)
-        tpl_name = os.path.basename(text)
-        if tpl_name and pictures_dir:
-            meta = template_meta.get(pictures_dir, tpl_name)
-            if meta:
-                spin_ox.blockSignals(True)
-                spin_oy.blockSignals(True)
-                spin_ox.setValue(meta.get("offset_x", 0))
-                spin_oy.setValue(meta.get("offset_y", 0))
-                spin_ox.blockSignals(False)
-                spin_oy.blockSignals(False)
-
-    edit_template.textChanged.connect(_on_template_changed)
-
-    # 偏移量变更时写回 meta.json
     def _on_offset_changed():
         tpl_name = os.path.basename(node.params.get("template", ""))
         if tpl_name and pictures_dir:
@@ -197,42 +212,24 @@ def build_find_and_tap_props(layout: QFormLayout, node, update_fn, context: dict
 
     spin_ox.valueChanged.connect(lambda v: _on_offset_changed())
     spin_oy.valueChanged.connect(lambda v: _on_offset_changed())
-
-    # 浏览按钮
-    browse_btn = QPushButton("📂 选择图片")
-    def _browse_template():
-        start_dir = pictures_dir if os.path.isdir(pictures_dir) else ""
-        path, _ = QFileDialog.getOpenFileName(
-            None, "选择模板图片", start_dir, "图片 (*.png *.jpg *.bmp)"
-        )
-        if path:
-            # 自动内化到项目 Pictures/
-            internalize_fn = ctx.get("internalize_fn")
-            if internalize_fn:
-                filename = internalize_fn(path)
-            else:
-                filename = os.path.basename(path)
-            edit_template.setText(filename)
-
-    browse_btn.clicked.connect(_browse_template)
-
-    # 阈值
-    spin_thresh = QDoubleSpinBox()
-    spin_thresh.setRange(0.5, 1.0)
-    spin_thresh.setSingleStep(0.05)
-    spin_thresh.setValue(node.params.get("threshold", 0.9))
-    spin_thresh.valueChanged.connect(lambda v: update_fn("threshold", v))
-
-    # 布局
-    tpl_row = QHBoxLayout()
-    tpl_row.addWidget(edit_template)
-    tpl_row.addWidget(browse_btn)
-    layout.addRow("模板图片:", tpl_row)
-    layout.addRow("匹配阈值:", spin_thresh)
     layout.addRow("偏移 X:", spin_ox)
     layout.addRow("偏移 Y:", spin_oy)
 
-    # 模板预览
+
+def build_wait_image_props(layout: QFormLayout, node, update_fn, context: dict = None):
+    """找图等待 — 属性面板（使用图库选择模板）"""
+    ctx = context or {}
+    pictures_dir = ctx.get("pictures_dir", "")
+
+    _raw_tpl = node.params.get("template", "")
+
+    # 当前模板显示 + 缩略图预览
+    tpl_display = _raw_tpl if _raw_tpl else "未选择"
+    tpl_label = QLabel(f"📄 {tpl_display}")
+    tpl_label.setStyleSheet("font-weight: bold;")
+    tpl_label.setWordWrap(True)
+    layout.addRow("模板:", tpl_label)
+
     if _raw_tpl and pictures_dir:
         tpl_path = os.path.join(pictures_dir, _raw_tpl)
         if os.path.exists(tpl_path):
@@ -240,116 +237,172 @@ def build_find_and_tap_props(layout: QFormLayout, node, update_fn, context: dict
             if not pixmap.isNull():
                 preview = QLabel()
                 preview.setPixmap(pixmap.scaled(
-                    120, 120,
+                    100, 60,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 ))
-                layout.addRow("预览:", preview)
+                layout.addRow(preview)
 
-    # 测试按钮
-    _add_test_find_btn(layout, node, context)
+    # 📂 选择模板按钮（打开单选图库）
+    gallery_fn = ctx.get("on_open_gallery")
+    if gallery_fn:
+        select_btn = QPushButton("📂 选择模板")
+        select_btn.setFixedHeight(26)
+        select_btn.clicked.connect(lambda: gallery_fn(node, "single", "template"))
+        layout.addRow(select_btn)
 
-
-def build_wait_image_props(layout: QFormLayout, node, update_fn, context: dict = None):
-    """找图等待 — 属性面板"""
-    ctx = context or {}
-    pictures_dir = ctx.get("pictures_dir", "")
-
-    edit_template = QLineEdit(node.params.get("template", ""))
-    edit_template.setPlaceholderText("模板图片文件名")
-    edit_template.textChanged.connect(lambda text: update_fn("template", text))
-
-    browse_btn = QPushButton("📂 选择图片")
-    def _browse():
-        start_dir = pictures_dir if os.path.isdir(pictures_dir) else ""
-        path, _ = QFileDialog.getOpenFileName(
-            None, "选择模板图片", start_dir, "图片 (*.png *.jpg *.bmp)"
-        )
-        if path:
-            internalize_fn = ctx.get("internalize_fn")
-            if internalize_fn:
-                filename = internalize_fn(path)
-            else:
-                filename = os.path.basename(path)
-            edit_template.setText(filename)
-
-    browse_btn.clicked.connect(_browse)
-
+    # 超时
     spin_timeout = QDoubleSpinBox()
     spin_timeout.setRange(0.0, 3600.0)
     spin_timeout.setSuffix(" 秒")
     spin_timeout.setValue(node.params.get("timeout", 30.0))
     spin_timeout.valueChanged.connect(lambda v: update_fn("timeout", v))
+    layout.addRow("超时判断:", spin_timeout)
 
+    # 超时后行为
     combo_fail = QComboBox()
     combo_fail.addItems(["abort", "continue"])
     combo_fail.setCurrentText(node.params.get("action_on_fail", "abort"))
     combo_fail.currentTextChanged.connect(lambda text: update_fn("action_on_fail", text))
-
-    tpl_row = QHBoxLayout()
-    tpl_row.addWidget(edit_template)
-    tpl_row.addWidget(browse_btn)
-    layout.addRow("模板图片:", tpl_row)
-    layout.addRow("超时判断:", spin_timeout)
     layout.addRow("超时后:", combo_fail)
 
 
 def build_multi_match_props(layout: QFormLayout, node, update_fn, context: dict = None):
-    """多图点击 — 属性面板（含子动作管理）"""
+    """多图点击 — 属性面板（含子动作管理与内联编辑）"""
+    from PyQt6.QtWidgets import QGridLayout, QWidget, QVBoxLayout, QFrame
     from gui.constants import COLOR_DANGER
     ctx = context or {}
 
     templates = node.params.get('templates', [])
     layout.addRow(QLabel(f"🎯 多图点击（{len(templates)} 个模板）"))
 
-    # 模板管理按钮
-    gallery_fn = ctx.get("on_template_gallery")
+    # 模板管理按钮（独占一行）
+    gallery_fn = ctx.get("on_open_gallery")
     if gallery_fn:
-        manage_btn = QPushButton("📂 模板管理")
+        manage_btn = QPushButton("📂 管理模板")
+        manage_btn.setFixedHeight(26)
         manage_btn.setToolTip("打开图库界面管理模板")
-        manage_btn.clicked.connect(lambda: gallery_fn(node))
+        manage_btn.clicked.connect(lambda: gallery_fn(node, "multi", "templates"))
         layout.addRow(manage_btn)
 
     # ---- 子动作管理 ----
-    layout.addRow(QLabel(""))
-    sub_label = QLabel("📋 匹配后执行的子动作:")
-    sub_label.setStyleSheet("font-weight: bold;")
+    sub_label = QLabel("📋 匹配后的子动作:")
+    sub_label.setStyleSheet("font-weight: bold; margin-top: 4px;")
     layout.addRow(sub_label)
 
     sub_actions = node.params.setdefault("sub_actions", [])
     sub_list = QListWidget()
-    sub_list.setMaximumHeight(120)
+    # 根据条目数动态设置高度，最少 2 行，最多 5 行
+    row_h = 22
+    visible_rows = max(2, min(len(sub_actions) + 1, 5))
+    sub_list.setFixedHeight(visible_rows * row_h + 4)
     sub_list.setAlternatingRowColors(True)
     for i, sa in enumerate(sub_actions):
         text = _format_sub_action(sa)
         sub_list.addItem(f"{i+1}. {text}")
     layout.addRow(sub_list)
 
-    # 添加子动作按钮
-    sub_btns = QHBoxLayout()
+    # ---- 子动作内联编辑区 ----
+    editor_frame = QFrame()
+    editor_frame.setStyleSheet(
+        "QFrame { border: 1px solid #555; border-radius: 4px; padding: 4px; }"
+    )
+    editor_outer = QVBoxLayout(editor_frame)
+    editor_outer.setContentsMargins(4, 4, 4, 4)
+    editor_outer.setSpacing(2)
+
+    # 编辑区提示占位
+    editor_hint = QLabel("← 选中子动作以编辑参数")
+    editor_hint.setStyleSheet("color: #888; border: none;")
+    editor_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    editor_outer.addWidget(editor_hint)
+
+    layout.addRow(editor_frame)
+
+    def _on_sub_selected(row):
+        """选中子动作时动态构建编辑面板"""
+        # 清空编辑区
+        while editor_outer.count():
+            child = editor_outer.takeAt(0)
+            w = child.widget()
+            if w:
+                w.deleteLater()
+
+        if row < 0 or row >= len(sub_actions):
+            hint = QLabel("← 选中子动作以编辑参数")
+            hint.setStyleSheet("color: #888; border: none;")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            editor_outer.addWidget(hint)
+            return
+
+        sa = sub_actions[row]
+        sa_type = sa.get("type", "")
+        sa_params = sa.setdefault("params", {})
+
+        # 标题
+        title = QLabel(f"✏️ 编辑 #{row + 1}: {_format_sub_action(sa)}")
+        title.setStyleSheet("font-weight: bold; color: #4fc3f7; border: none;")
+        editor_outer.addWidget(title)
+
+        # 使用 _SubActionProxy 适配字典为 builder 可接受的对象
+        proxy = _SubActionProxy(sa_type, sa_params)
+
+        form_widget = QWidget()
+        form_widget.setStyleSheet("border: none;")  # 继承的边框去掉
+        form_layout = QFormLayout(form_widget)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+
+        def _update_sub_param(key, value):
+            """修改子动作参数并刷新列表文本"""
+            sa_params[key] = value
+            # 刷新列表中的显示文本
+            item = sub_list.item(row)
+            if item:
+                item.setText(f"{row + 1}. {_format_sub_action(sa)}")
+
+        # 根据类型复用对应的 builder（不含测试按钮）
+        builder = _SUB_BUILDERS.get(sa_type)
+        if builder:
+            builder(form_layout, proxy, _update_sub_param, ctx)
+        else:
+            form_layout.addRow(QLabel("此类型暂无可编辑参数"))
+
+        editor_outer.addWidget(form_widget)
+
+    sub_list.currentRowChanged.connect(_on_sub_selected)
+
+    # ---- 添加子动作按钮 — 2×2 网格 + 独立删除按钮 ----
     add_fn = ctx.get("on_sub_action_add")
     del_fn = ctx.get("on_sub_action_del")
 
-    for btn_label, action_dict in [
-        ("+ 等待", {"type": "sleep", "params": {"seconds": 1.0}}),
-        ("+ 点击", {"type": "tap", "params": {"x": 0, "y": 0}}),
-        ("+ 找图点击", {"type": "find_and_tap", "params": {"template": "", "threshold": 0.9}}),
-        ("+ 找图等待", {"type": "wait_image", "params": {"template": "", "timeout": 30.0, "action_on_fail": "abort"}}),
-    ]:
-        btn = QPushButton(btn_label)
-        btn.setFixedHeight(26)
-        if add_fn:
-            btn.clicked.connect(lambda checked=False, ad=action_dict: add_fn(node, ad))
-        sub_btns.addWidget(btn)
+    btn_container = QWidget()
+    grid = QGridLayout(btn_container)
+    grid.setContentsMargins(0, 0, 0, 0)
+    grid.setSpacing(3)
 
-    del_btn = QPushButton("删除")
-    del_btn.setFixedHeight(26)
+    btn_defs = [
+        ("+ 等待",     {"type": "sleep", "params": {"seconds": 1.0}}),
+        ("+ 点击",     {"type": "tap", "params": {"x": 0, "y": 0}}),
+        ("+ 找图点击",  {"type": "find_and_tap", "params": {"template": "", "threshold": 0.9}}),
+        ("+ 找图等待",  {"type": "wait_image", "params": {"template": "", "timeout": 30.0, "action_on_fail": "abort"}}),
+    ]
+    # 2×2 网格
+    for idx, (label, ad) in enumerate(btn_defs):
+        btn = QPushButton(label)
+        btn.setFixedHeight(24)
+        if add_fn:
+            btn.clicked.connect(lambda checked=False, a=ad: add_fn(node, a))
+        grid.addWidget(btn, idx // 2, idx % 2)
+
+    # 删除按钮独占一行
+    del_btn = QPushButton("🗑 删除选中子动作")
+    del_btn.setFixedHeight(24)
     del_btn.setStyleSheet(f"color: {COLOR_DANGER};")
     if del_fn:
         del_btn.clicked.connect(lambda: del_fn(node, sub_list.currentRow()))
-    sub_btns.addWidget(del_btn)
+    grid.addWidget(del_btn, 2, 0, 1, 2)  # 跨两列
 
-    layout.addRow(sub_btns)
+    layout.addRow(btn_container)
 
 
 def append_comment_row(layout: QFormLayout, node):
@@ -391,6 +444,128 @@ def build_action_props(layout: QFormLayout, node, update_fn, context: dict = Non
         builder(layout, node, update_fn, context)
         return True
     return False
+
+
+# =================== 子动作编辑辅助 ===================
+
+
+class _SubActionProxy:
+    """将子动作字典适配为 builder 函数可接受的节点对象。"""
+    def __init__(self, sa_type: str, sa_params: dict):
+        self.type = sa_type
+        self.params = sa_params
+
+
+def _build_sub_tap(layout, proxy, update_fn, ctx=None):
+    """子动作：点击坐标编辑（精简版，无测试按钮）"""
+    spin_x = QSpinBox()
+    spin_x.setRange(0, 4000)
+    spin_x.setValue(proxy.params.get("x", 0))
+    spin_x.valueChanged.connect(lambda v: update_fn("x", v))
+    layout.addRow("X:", spin_x)
+
+    spin_y = QSpinBox()
+    spin_y.setRange(0, 4000)
+    spin_y.setValue(proxy.params.get("y", 0))
+    spin_y.valueChanged.connect(lambda v: update_fn("y", v))
+    layout.addRow("Y:", spin_y)
+
+
+def _build_sub_sleep(layout, proxy, update_fn, ctx=None):
+    """子动作：等待时间编辑"""
+    spin_sec = QDoubleSpinBox()
+    spin_sec.setRange(0.1, 3600.0)
+    spin_sec.setSuffix(" 秒")
+    spin_sec.setValue(proxy.params.get("seconds", 1.0))
+    spin_sec.valueChanged.connect(lambda v: update_fn("seconds", v))
+    layout.addRow("等待:", spin_sec)
+
+
+def _build_sub_find_and_tap(layout, proxy, update_fn, ctx=None):
+    """子动作：找图点击编辑（精简版）"""
+    ctx = ctx or {}
+    pictures_dir = ctx.get("pictures_dir", "")
+
+    edit_tpl = QLineEdit(proxy.params.get("template", ""))
+    edit_tpl.setPlaceholderText("模板图片文件名")
+    edit_tpl.textChanged.connect(lambda t: update_fn("template", t))
+
+    browse_btn = QPushButton("📂")
+    browse_btn.setFixedWidth(30)
+    def _browse():
+        start = pictures_dir if os.path.isdir(pictures_dir) else ""
+        path, _ = QFileDialog.getOpenFileName(None, "选择模板", start, "图片 (*.png *.jpg *.bmp)")
+        if path:
+            internalize_fn = ctx.get("internalize_fn")
+            if internalize_fn:
+                filename = internalize_fn(path)
+            else:
+                filename = os.path.basename(path)
+            edit_tpl.setText(filename)
+    browse_btn.clicked.connect(_browse)
+
+    tpl_row = QHBoxLayout()
+    tpl_row.addWidget(edit_tpl)
+    tpl_row.addWidget(browse_btn)
+    layout.addRow("模板:", tpl_row)
+
+    spin_th = QDoubleSpinBox()
+    spin_th.setRange(0.5, 1.0)
+    spin_th.setSingleStep(0.05)
+    spin_th.setValue(proxy.params.get("threshold", 0.9))
+    spin_th.valueChanged.connect(lambda v: update_fn("threshold", v))
+    layout.addRow("阈值:", spin_th)
+
+
+def _build_sub_wait_image(layout, proxy, update_fn, ctx=None):
+    """子动作：找图等待编辑（精简版）"""
+    ctx = ctx or {}
+    pictures_dir = ctx.get("pictures_dir", "")
+
+    edit_tpl = QLineEdit(proxy.params.get("template", ""))
+    edit_tpl.setPlaceholderText("模板图片文件名")
+    edit_tpl.textChanged.connect(lambda t: update_fn("template", t))
+
+    browse_btn = QPushButton("📂")
+    browse_btn.setFixedWidth(30)
+    def _browse():
+        start = pictures_dir if os.path.isdir(pictures_dir) else ""
+        path, _ = QFileDialog.getOpenFileName(None, "选择模板", start, "图片 (*.png *.jpg *.bmp)")
+        if path:
+            internalize_fn = ctx.get("internalize_fn")
+            if internalize_fn:
+                filename = internalize_fn(path)
+            else:
+                filename = os.path.basename(path)
+            edit_tpl.setText(filename)
+    browse_btn.clicked.connect(_browse)
+
+    tpl_row = QHBoxLayout()
+    tpl_row.addWidget(edit_tpl)
+    tpl_row.addWidget(browse_btn)
+    layout.addRow("模板:", tpl_row)
+
+    spin_timeout = QDoubleSpinBox()
+    spin_timeout.setRange(0.0, 3600.0)
+    spin_timeout.setSuffix(" 秒")
+    spin_timeout.setValue(proxy.params.get("timeout", 30.0))
+    spin_timeout.valueChanged.connect(lambda v: update_fn("timeout", v))
+    layout.addRow("超时:", spin_timeout)
+
+    combo_fail = QComboBox()
+    combo_fail.addItems(["abort", "continue"])
+    combo_fail.setCurrentText(proxy.params.get("action_on_fail", "abort"))
+    combo_fail.currentTextChanged.connect(lambda t: update_fn("action_on_fail", t))
+    layout.addRow("超时后:", combo_fail)
+
+
+# 子动作类型 → 精简 builder 映射（不含测试按钮）
+_SUB_BUILDERS = {
+    "tap": _build_sub_tap,
+    "sleep": _build_sub_sleep,
+    "find_and_tap": _build_sub_find_and_tap,
+    "wait_image": _build_sub_wait_image,
+}
 
 
 # =================== 辅助函数 ===================
@@ -484,48 +659,66 @@ def _add_test_find_btn(layout, node, context):
     test_btn = QPushButton("🧪 测试找图点击")
     test_btn.setToolTip("截图一次并尝试匹配点击")
     def _test_find_and_tap():
+        # ------- 主线程：参数校验 -------
+        def _log(msg):
+            if hasattr(main_win, '_append_log'):
+                main_win._append_log(msg)
+
+        device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
+        if not device_id:
+            _log("🧪 测试失败：请先选择设备")
+            return
+        tpl = node.params.get('template', '')
+        if not tpl:
+            _log("🧪 测试失败：请先设置模板图片")
+            return
+        tpl_path = tpl
+        if not os.path.exists(tpl_path):
+            tpl_path = os.path.join(pictures_dir, tpl)
+        if not os.path.exists(tpl_path):
+            _log(f"🧪 测试失败：模板文件不存在 [{tpl_path}]")
+            return
+
+        _log(f"🧪 正在截图并匹配 [{os.path.basename(tpl_path)}]...")
+
+        # ------- 后台线程：阻塞 ADB 截图 + 匹配 -------
         import threading
         def _do_test():
-            from adb_utils import screencap_to_memory, tap as adb_tap
-            import image_engine
-            import template_meta
+            try:
+                from adb_utils import screencap_to_memory, tap as adb_tap
+                import image_engine
+                import template_meta
 
-            def _safe_log(msg):
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: main_win._append_log(msg) if hasattr(main_win, '_append_log') else None)
+                tpl_dir = os.path.dirname(tpl_path) or '.'
+                # 测试时强制清除缓存，确保新增模板能被加载
+                image_engine.clear_cache(tpl_dir)
+                loaded = image_engine.load_templates(tpl_dir)
+                target_name = os.path.splitext(os.path.basename(tpl_path))[0]
+                target = [t for t in loaded if t[0] == target_name]
+                if not target:
+                    print(f"[测试找图] 模板加载失败: {tpl}")
+                    return
 
-            device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
-            if not device_id:
-                return
-            tpl = node.params.get('template', '')
-            if not tpl:
-                return
-            tpl_path = tpl
-            if not os.path.exists(tpl_path):
-                tpl_path = os.path.join(pictures_dir, tpl)
-            tpl_dir = os.path.dirname(tpl_path) or '.'
-            loaded = image_engine.load_templates(tpl_dir)
-            target_name = os.path.splitext(os.path.basename(tpl_path))[0]
-            target = [t for t in loaded if t[0] == target_name]
-            if not target:
-                _safe_log(f"🧪 测试失败：未找到模板 [{tpl}]")
-                return
-            img = screencap_to_memory(device_id)
-            if img is None:
-                _safe_log("🧪 测试失败：截图失败")
-                return
-            th = node.params.get('threshold', 0.9)
-            matches = image_engine.match_all(img, target, th)
-            if matches:
-                name, cx, cy, score = matches[0]
-                meta = template_meta.get(pictures_dir, os.path.basename(tpl))
-                ox = meta.get('offset_x', 0)
-                oy = meta.get('offset_y', 0)
-                final_x, final_y = cx + ox, cy + oy
-                adb_tap(device_id, final_x, final_y)
-                _safe_log(f"🧪 测试成功：匹配 {score:.2f}，点击 ({final_x}, {final_y})")
-            else:
-                _safe_log("🧪 测试失败：未匹配到图片")
+                img = screencap_to_memory(device_id)
+                if img is None:
+                    print("[测试找图] ADB 截图返回 None")
+                    return
+
+                th = node.params.get('threshold', 0.9)
+                matches = image_engine.match_all(img, target, th)
+                if matches:
+                    name, cx, cy, score = matches[0]
+                    meta = template_meta.get(pictures_dir, os.path.basename(tpl))
+                    ox = meta.get('offset_x', 0)
+                    oy = meta.get('offset_y', 0)
+                    final_x, final_y = cx + ox, cy + oy
+                    adb_tap(device_id, final_x, final_y)
+                    print(f"[测试找图] 匹配成功 {score:.2f}，已点击 ({final_x}, {final_y})")
+                else:
+                    print("[测试找图] 未匹配到图片")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
         threading.Thread(target=_do_test, daemon=True).start()
     test_btn.clicked.connect(_test_find_and_tap)
     layout.addRow(test_btn)

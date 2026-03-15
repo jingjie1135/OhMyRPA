@@ -42,9 +42,7 @@ class ScriptConfig:
                  check_resolution: bool = True,
                  # 循环执行专用参数
                  scan_interval: float = 1.0,
-                 max_loops: int = 0,
-                 default_tap_x: int = 0,
-                 default_tap_y: int = 0):
+                 max_loops: int = 0):
         self.popup_guard = popup_guard         # 是否开启全局弹窗守卫
         self.guard_dir = guard_dir             # 弹窗关闭按钮图库目录
         self.guard_trigger_fails = guard_trigger_fails  # 主线找图连续失败几次后触发守卫扫描
@@ -53,8 +51,6 @@ class ScriptConfig:
         # 循环模式参数
         self.scan_interval = scan_interval     # 每轮截图间隔（秒）
         self.max_loops = max_loops             # 最大循环次数（0=无限）
-        self.default_tap_x = default_tap_x     # 无匹配时默认点击 X
-        self.default_tap_y = default_tap_y     # 无匹配时默认点击 Y
         
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,9 +60,7 @@ class ScriptConfig:
             "resolution": self.resolution,
             "check_resolution": self.check_resolution,
             "scan_interval": self.scan_interval,
-            "max_loops": self.max_loops,
-            "default_tap_x": self.default_tap_x,
-            "default_tap_y": self.default_tap_y
+            "max_loops": self.max_loops
         }
         
     @classmethod
@@ -78,9 +72,7 @@ class ScriptConfig:
             resolution=data.get("resolution", ""),
             check_resolution=data.get("check_resolution", True),
             scan_interval=data.get("scan_interval", 1.0),
-            max_loops=data.get("max_loops", 0),
-            default_tap_x=data.get("default_tap_x", 0),
-            default_tap_y=data.get("default_tap_y", 0)
+            max_loops=data.get("max_loops", 0)
         )
 
 class ScriptModel:
@@ -185,6 +177,12 @@ class ScriptModel:
         os.makedirs(self.pictures_dir, exist_ok=True)
         if not os.path.exists(dest):
             shutil.copy2(abs_path, dest)
+            # 新文件入库，清除该目录的模板缓存，确保后续加载能命中新文件
+            try:
+                import image_engine
+                image_engine.clear_cache(self.pictures_dir)
+            except Exception:
+                pass
         
         return filename
     

@@ -10,8 +10,9 @@ from PyQt6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
 
-# 应用图标路径
-_ICON_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
+# 应用图标路径（兼容 Nuitka 打包环境）
+from config import BASE_DIR
+_ICON_PATH = os.path.join(BASE_DIR, "icon.png")
 
 
 def main():

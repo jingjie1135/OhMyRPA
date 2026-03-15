@@ -7,6 +7,7 @@ import os
 import cv2
 import numpy as np
 import logging
+import threading
 
 from config import MATCH_THRESHOLD, NMS_IOU_THRESHOLD
 
@@ -17,6 +18,16 @@ logger = logging.getLogger(__name__)
 # 全局缓存字典：{目录路径: [(模板名, 模板图像矩阵), ...]}
 # 避免重复从磁盘读取图片，显著降低 IO 开销
 _template_cache = {}
+_cache_lock = threading.Lock()
+
+def clear_cache(directory=None):
+    """清除模板缓存。如果指定了目录，则只清除该目录的缓存；否则清除所有。"""
+    with _cache_lock:
+        if directory is None:
+            _template_cache.clear()
+        elif directory in _template_cache:
+            del _template_cache[directory]
+        logger.info(f"已清理模板缓存: {directory or '全部'}")
 
 
 def load_templates(directory):
@@ -31,14 +42,16 @@ def load_templates(directory):
         list[tuple[str, numpy.ndarray]]: [(模板名称, BGR图像矩阵), ...]
     """
     # 检查缓存命中
-    if directory in _template_cache:
-        return _template_cache[directory]
+    with _cache_lock:
+        if directory in _template_cache:
+            return _template_cache[directory]
 
     templates = []
 
     if not os.path.isdir(directory):
         logger.warning("模板目录不存在: %s", directory)
-        _template_cache[directory] = templates
+        with _cache_lock:
+            _template_cache[directory] = templates
         return templates
 
     for filename in os.listdir(directory):
@@ -60,7 +73,8 @@ def load_templates(directory):
         templates.append((name, img))
         logger.info("已加载模板: %s (%dx%d)", name, img.shape[1], img.shape[0])
 
-    _template_cache[directory] = templates
+    with _cache_lock:
+        _template_cache[directory] = templates
     logger.info("目录 [%s] 共加载 %d 个模板", directory, len(templates))
     return templates
 

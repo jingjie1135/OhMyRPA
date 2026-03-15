@@ -153,7 +153,7 @@ class LoopScriptTab(QWidget):
         splitter.addWidget(left_widget)
         splitter.addWidget(center_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([180, 350, 250])
+        splitter.setSizes([190, 340, 250])
         
         root.addWidget(splitter, stretch=1)
         
@@ -437,14 +437,7 @@ class LoopScriptTab(QWidget):
         layout.addRow(QLabel(""))  # 分隔
         layout.addRow(QLabel("⚙️ 循环参数"))
         
-        # 循环类型
-        loop_type_combo = QComboBox()
-        loop_type_combo.addItems(["多模板匹配", "普通循环"])
-        loop_type_combo.setToolTip(
-            "多模板匹配：一次截图遍历所有模板，命中哪个点哪个\n"
-            "普通循环：顺序执行脚本 + 循环次数"
-        )
-        layout.addRow("循环类型:", loop_type_combo)
+
         
         # 循环次数
         spin_max_loops = QSpinBox()
@@ -467,25 +460,7 @@ class LoopScriptTab(QWidget):
         )
         layout.addRow("扫描间隔:", spin_interval)
         
-        # 无匹配时默认点击
-        layout.addRow(QLabel(""))  # 分隔
-        layout.addRow(QLabel("🎯 无匹配时默认点击"))
-        
-        spin_def_x = QSpinBox()
-        spin_def_x.setRange(0, 4000)
-        spin_def_x.setValue(cfg.default_tap_x)
-        spin_def_x.valueChanged.connect(
-            lambda v: setattr(cfg, 'default_tap_x', v)
-        )
-        layout.addRow("X 坐标:", spin_def_x)
-        
-        spin_def_y = QSpinBox()
-        spin_def_y.setRange(0, 4000)
-        spin_def_y.setValue(cfg.default_tap_y)
-        spin_def_y.valueChanged.connect(
-            lambda v: setattr(cfg, 'default_tap_y', v)
-        )
-        layout.addRow("Y 坐标:", spin_def_y)
+
         
         # --- 统计信息 ---
         layout.addRow(QLabel(""))  # 分隔
@@ -505,8 +480,13 @@ class LoopScriptTab(QWidget):
         from gui.action_props import build_action_props, append_comment_row
         from PyQt6.QtWidgets import QFormLayout
         
-        widget = QWidget()
-        layout = QFormLayout(widget)
+        wrapper = QWidget()
+        outer = QVBoxLayout(wrapper)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        
+        form_widget = QWidget()
+        layout = QFormLayout(form_widget)
         
         def update_param(key, value):
             node.params[key] = value
@@ -518,7 +498,7 @@ class LoopScriptTab(QWidget):
             "main_win": main_win,
             "pictures_dir": self.current_model.pictures_dir if self.current_model else "",
             "internalize_fn": self.current_model.internalize_image if self.current_model else None,
-            "on_template_gallery": self._open_template_gallery,
+            "on_open_gallery": self._open_gallery,
             "on_sub_action_add": self._add_sub_action,
             "on_sub_action_del": self._del_sub_action,
         }
@@ -531,7 +511,9 @@ class LoopScriptTab(QWidget):
         # 通用备注行
         append_comment_row(layout, node)
         
-        return widget
+        outer.addWidget(form_widget)
+        outer.addStretch(1)  # 将内容推到顶部，防止均匀拉伸
+        return wrapper
     
     def _sync_meta_offsets(self, node, filename):
         """从 meta.json 同步偏移量到节点参数"""
@@ -561,18 +543,30 @@ class LoopScriptTab(QWidget):
             if hasattr(main_win, '_append_log'):
                 main_win._append_log(f"💾 循环脚本已保存: {self.current_model.name}")
     
-    def _open_template_gallery(self, node):
-        """在整个 Tab 区域显示图库（全覆盖，类似主图库）"""
+    def _open_gallery(self, node, mode="multi", param_key="templates"):
+        """统一图库入口：在整个 Tab 区域显示图库（全覆盖）
+        
+        Args:
+            node: 当前 ActionNode
+            mode: "single" 单选 / "multi" 多选
+            param_key: 写回参数的键名（multi→"templates", single→"template"）
+        """
         if not self.current_model:
             return
         
         from gui.template_gallery_dialog import TemplateGalleryWidget
         
         pictures_dir = self.current_model.pictures_dir
-        current_templates = node.params.get("templates", [])
+        
+        # 构造当前模板列表（单选模式也转为 list 格式统一处理）
+        if mode == "single":
+            tpl_val = node.params.get(param_key, "")
+            current_templates = [{"template": tpl_val}] if tpl_val else []
+        else:
+            current_templates = node.params.get(param_key, [])
         
         # 创建图库控件
-        gallery = TemplateGalleryWidget(pictures_dir, current_templates, self)
+        gallery = TemplateGalleryWidget(pictures_dir, current_templates, mode=mode, parent=self)
         
         # 绑定主窗口的 ScreenshotWidget
         main_win = self.window()
@@ -594,17 +588,26 @@ class LoopScriptTab(QWidget):
             self._page_stack.removeWidget(gallery)
             gallery.deleteLater()
             
-            # 只在模板列表有变化时才保存
-            old_templates = node.params.get("templates", [])
-            changed = (len(updated_templates) != len(old_templates) or
-                       any(u.get("template") != o.get("template")
-                           for u, o in zip(updated_templates, old_templates)))
-            
-            if changed:
-                node.params["templates"] = updated_templates
-                self.current_model.save()
-                if hasattr(main_win, '_append_log'):
-                    main_win._append_log(f"📂 模板已更新: {len(updated_templates)} 个启用")
+            if mode == "single":
+                # 单选模式：取第一个选中的文件名写入 param_key
+                new_val = updated_templates[0].get("template", "") if updated_templates else ""
+                old_val = node.params.get(param_key, "")
+                if new_val != old_val:
+                    node.params[param_key] = new_val
+                    self.current_model.save()
+                    if hasattr(main_win, '_append_log'):
+                        main_win._append_log(f"📂 已选择模板: {new_val}")
+            else:
+                # 多选模式：写入模板列表
+                old_templates = node.params.get(param_key, [])
+                changed = (len(updated_templates) != len(old_templates) or
+                           any(u.get("template") != o.get("template")
+                               for u, o in zip(updated_templates, old_templates)))
+                if changed:
+                    node.params[param_key] = updated_templates
+                    self.current_model.save()
+                    if hasattr(main_win, '_append_log'):
+                        main_win._append_log(f"📂 模板已更新: {len(updated_templates)} 个启用")
             
             # 刷新并恢复选中行
             self._reload_action_list_ui()

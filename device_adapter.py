@@ -270,3 +270,85 @@ class ScrcpyAdapter(DeviceAdapter):
     def supports_touch(self) -> bool:
         """ScrcpyAdapter 支持精细触摸操作。"""
         return self._client is not None and self._client.alive
+
+
+# ==================== HybridDeviceAdapter ====================
+
+class HybridDeviceAdapter(DeviceAdapter):
+    """
+    基于 RPA Matrix 架构的混合驱动适配器 (Sensor-Actuator Separation)。
+    
+    特点：
+    - 视觉感知 (Sensor): 强制使用 ADB 获取绝对无损的实时画面 (`get_frame` / `get_resolution`)。
+    - 物理操作 (Actuator): 自动将所有操作 (`click`, `swipe_path` 等) 路由至由于 Scrcpy 控制通道，
+                      实现极低延迟和防封笔迹。如果 Scrcpy 不可用，自动平滑退化回 ADB 盲打。
+    """
+    
+    def __init__(self, device_id: str, scrcpy_client=None):
+        self._device_id = device_id
+        # 视觉/后备控制单元
+        self._adb_adapter = AdbAdapter(device_id)
+        # 高速执行单元 (即便 client 为 None，我们也将其视作占位符)
+        self._scrcpy_adapter = ScrcpyAdapter(device_id, scrcpy_client)
+
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    # ---------- 视觉感知层 (路由至 ADB) ----------
+    
+    def get_resolution(self) -> tuple[int, int]:
+        return self._adb_adapter.get_resolution()
+
+    def get_frame(self):
+        """核心：强制走 ADB 极速无损拉取，保证 100% 找图命中率。"""
+        return self._adb_adapter.get_frame()
+
+    # ---------- 物理操作层 (优先路由至 Scrcpy 控制通道) ----------
+
+    @property
+    def _actuator(self) -> DeviceAdapter:
+        """选择最佳执行器"""
+        if self._scrcpy_adapter.supports_touch:
+            return self._scrcpy_adapter
+        return self._adb_adapter
+
+    def tap(self, x: int, y: int) -> None:
+        self._actuator.tap(x, y)
+
+    def click(self, x: int, y: int) -> None:
+        self._actuator.click(x, y)
+
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 500) -> None:
+        self._actuator.swipe(x1, y1, x2, y2, duration_ms)
+
+    def swipe_path(self, path: list[tuple[int, int]], duration_ms: int = 500) -> None:
+        self._actuator.swipe_path(path, duration_ms)
+
+    def touch_down(self, x: int, y: int, touch_id: int = -1) -> None:
+        self._actuator.touch_down(x, y, touch_id)
+
+    def touch_move(self, x: int, y: int, touch_id: int = -1) -> None:
+        self._actuator.touch_move(x, y, touch_id)
+
+    def touch_up(self, x: int, y: int, touch_id: int = -1) -> None:
+        self._actuator.touch_up(x, y, touch_id)
+
+    def back(self) -> None:
+        self._actuator.back()
+
+    def home(self) -> None:
+        self._actuator.home()
+
+    def app_switch(self) -> None:
+        self._actuator.app_switch()
+
+    def set_display_power(self, on: bool) -> None:
+        self._actuator.set_display_power(on)
+
+    def back_or_screen_on(self) -> None:
+        self._actuator.back_or_screen_on()
+
+    @property
+    def supports_touch(self) -> bool:
+        return self._actuator.supports_touch
