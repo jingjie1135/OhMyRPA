@@ -78,17 +78,30 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         """构建主界面布局。"""
         self.setWindowTitle("模拟器 · 自动化脚本 v0.1")
-        self.resize(1000, 800)
+        self.resize(1000, 900)
         self.setMinimumSize(1000, 800)
 
-        # 中央控件
         central = QWidget()
         self.setCentralWidget(central)
+        
+        # 外层布局：无边距，使顶栏贴边
         main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(8)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ===== 顶部：ADB + 设备选择栏 =====
+        # 引入并添加顶栏
+        from gui.top_bar import TopBar
+        self.header = TopBar("模拟器 · 自动化脚本")
+        main_layout.addWidget(self.header)
+
+        # 内部主内容布局：还原原有的边距和间距
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(8)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addWidget(content_widget, 1)
+
+        # ===== 控制栏：ADB + 设备选择栏 =====
         top_bar = QHBoxLayout()
 
         # ADB 选择器
@@ -171,7 +184,7 @@ class MainWindow(QMainWindow):
         self.resolution_label.setStyleSheet(f"color: {COLOR_DISABLED};")
         top_bar.addWidget(self.resolution_label)
 
-        main_layout.addLayout(top_bar)
+        content_layout.addLayout(top_bar)
 
         # ===== 中部：截图预览 + 功能面板 =====
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -301,7 +314,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
-        main_layout.addWidget(splitter, 1)
+        content_layout.addWidget(splitter, 1)
 
         # ===== 底部：日志区 =====
         log_group = QGroupBox("运行日志")
@@ -318,7 +331,7 @@ class MainWindow(QMainWindow):
         )
 
         log_layout.addWidget(self.log_text)
-        main_layout.addWidget(log_group)
+        content_layout.addWidget(log_group)
 
         # 初始加载设备列表
         QTimer.singleShot(100, self._refresh_devices)

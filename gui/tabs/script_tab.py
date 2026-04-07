@@ -160,7 +160,7 @@ class ScriptTab(QWidget):
         splitter.addWidget(left_widget)
         splitter.addWidget(center_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([210, 390, 250])
+        splitter.setSizes([230, 390, 250])
         
         main_layout.addWidget(splitter, stretch=1)
 
