@@ -80,70 +80,331 @@ MAX_WORKERS = 4
 # ===================== ADB 配置 =====================
 
 import glob
-import shutil
+import string
+import logging
+
+_adb_logger = logging.getLogger(__name__)
+
+
+def _get_available_drives():
+    """
+    动态获取系统所有可用盘符列表（如 ['C:\\', 'D:\\', 'G:\\']）。
+    避免硬编码盘符，兼容任意磁盘配置。
+    """
+    drives = []
+    for letter in string.ascii_uppercase:
+        drive = f"{letter}:\\"
+        if os.path.exists(drive):
+            drives.append(drive)
+    return drives
+
+
+def _search_registry_install_paths():
+    """
+    从 Windows 注册表查找模拟器安装路径。
+    策略：遍历 Uninstall 下所有子项，模糊匹配关键词（兼容任意版本号和名称变体）。
+    返回 dict: { "显示名称": "安装目录" }
+    """
+    results = {}
+    try:
+        import winreg
+    except ImportError:
+        return results
+
+    # 模糊匹配规则：(关键词列表, 显示名称) — 子项名称或 DisplayName 包含任一关键词即命中
+    match_rules = [
+        (["ldplayer", "leidian"], "雷电"),
+        (["mumu", "nemu"], "MUMU"),
+    ]
+
+    # 需要搜索的注册表根路径
+    uninstall_roots = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ]
+
+    for hkey, uninstall_path in uninstall_roots:
+        try:
+            with winreg.OpenKey(hkey, uninstall_path) as parent_key:
+                i = 0
+                while True:
+                    try:
+                        sub_key_name = winreg.EnumKey(parent_key, i)
+                        i += 1
+                    except OSError:
+                        break
+
+                    sub_key_lower = sub_key_name.lower()
+
+                    for keywords, display_name in match_rules:
+                        if display_name in results:
+                            continue
+
+                        # 检查子项名称是否包含关键词
+                        matched = any(kw in sub_key_lower for kw in keywords)
+
+                        if not matched:
+                            # 再检查 DisplayName 值
+                            try:
+                                with winreg.OpenKey(parent_key, sub_key_name) as sub_key:
+                                    disp_name, _ = winreg.QueryValueEx(sub_key, "DisplayName")
+                                    if disp_name and any(kw in disp_name.lower() for kw in keywords):
+                                        matched = True
+                            except (FileNotFoundError, OSError):
+                                pass
+
+                        if matched:
+                            try:
+                                with winreg.OpenKey(parent_key, sub_key_name) as sub_key:
+                                    install_dir, _ = winreg.QueryValueEx(sub_key, "InstallLocation")
+                                    if install_dir and os.path.isdir(install_dir):
+                                        results[display_name] = install_dir.rstrip("\\")
+                                        _adb_logger.info(
+                                            "注册表匹配 [%s] → %s 安装目录: %s",
+                                            sub_key_name, display_name, install_dir
+                                        )
+                            except (FileNotFoundError, OSError):
+                                # 没有 InstallLocation，尝试从 UninstallString 反推
+                                try:
+                                    with winreg.OpenKey(parent_key, sub_key_name) as sub_key:
+                                        uninst, _ = winreg.QueryValueEx(sub_key, "UninstallString")
+                                        if uninst:
+                                            uninst_dir = os.path.dirname(uninst.strip('"'))
+                                            if os.path.isdir(uninst_dir):
+                                                results[display_name] = uninst_dir.rstrip("\\")
+                                                _adb_logger.info(
+                                                    "注册表从 UninstallString 反推 %s 目录: %s",
+                                                    display_name, uninst_dir
+                                                )
+                                except (FileNotFoundError, OSError):
+                                    pass
+
+        except (FileNotFoundError, OSError):
+            continue
+
+    return results
+
+
+def _find_adb_near_exe(exe_path):
+    """
+    从一个可执行文件路径出发，在其所在目录及上级目录中查找 adb.exe。
+    同时检查 shell/ 和 vmonitor/bin/ 等子目录。最多向上查找 3 层。
+    返回 adb.exe 路径或 None。
+    """
+    if not exe_path or not os.path.isfile(exe_path):
+        return None
+
+    search_dir = os.path.dirname(exe_path)
+    # 需要检查的子目录列表
+    _sub_dirs = ["", "shell", "nx_main", "vmonitor\\bin", "emulator\\nemu", "bin"]
+    for _ in range(4):  # 当前目录 + 向上 3 层
+        for sub in _sub_dirs:
+            adb_path = os.path.join(search_dir, sub, "adb.exe") if sub else os.path.join(search_dir, "adb.exe")
+            if os.path.isfile(adb_path):
+                return adb_path
+        parent = os.path.dirname(search_dir)
+        if parent == search_dir:
+            break
+        search_dir = parent
+    return None
+
+
+def _search_running_processes():
+    """
+    扫描当前运行中的模拟器进程，从进程路径反推 ADB 位置。
+    返回 dict: { "显示名称": "adb.exe 完整路径" }
+    无需第三方库，使用 WMIC 命令查询。
+    """
+    import subprocess as _sp
+    results = {}
+
+    # 进程名 → 显示名称（ADB 位置通过 _find_adb_near_exe 智能查找）
+    process_map = {
+        # 雷电模拟器
+        "dnplayer.exe":        "雷电",
+        "ldplayer.exe":        "雷电",
+        "ldconsole.exe":       "雷电",
+        "ldboxheadless.exe":   "雷电",
+        # MUMU 模拟器（覆盖所有已知进程名）
+        "mumuplayer.exe":      "MUMU",
+        "mumuglobal.exe":      "MUMU",
+        "mumumanager.exe":     "MUMU",
+        "nemuheadless.exe":    "MUMU",
+        "nemuplayer.exe":      "MUMU",
+        "mumuvmmsvc.exe":      "MUMU",
+        "mumuvmmheadless.exe": "MUMU",
+        "mumuhypervcenter.exe":"MUMU",
+    }
+
+    try:
+        _flags = _sp.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        result = _sp.run(
+            ["wmic", "process", "get", "ExecutablePath"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=_flags
+        )
+        if result.returncode != 0:
+            return results
+
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            exe_name = os.path.basename(line).lower()
+            if exe_name in process_map:
+                display_name = process_map[exe_name]
+                if display_name in results:
+                    continue
+                # 智能查找 adb.exe（当前目录 + 上级目录 + 子目录）
+                adb_path = _find_adb_near_exe(line)
+                if adb_path:
+                    results[display_name] = adb_path
+                    _adb_logger.info("从运行进程发现 %s ADB: %s", display_name, adb_path)
+    except Exception as e:
+        _adb_logger.debug("进程扫描失败: %s", e)
+
+    return results
 
 
 def scan_adb_paths():
     """
-    自动扫描常见模拟器和系统的 ADB 路径。
+    自动扫描雷电 / MUMU 模拟器的 ADB 路径（不使用系统 ADB）。
+    扫描策略（按优先级）：
+      1. Windows 注册表 — 最精准，直接读取安装目录
+      2. 运行进程反推 — 如果模拟器正在运行，从进程路径定位
+      3. 全盘符路径猜测 — 遍历所有盘符 + 常见安装路径模式
     返回 dict: { "显示名称": "adb.exe 完整路径" }
-    扫描范围：雷电、MUMU、夜神、系统 PATH
     """
     found = {}
 
+    # ===== 策略一：注册表查找 =====
+    registry_dirs = _search_registry_install_paths()
+    for name, install_dir in registry_dirs.items():
+        if name not in found:
+            # 统一使用智能查找，兼容各种子目录结构
+            # 先构造一个虚拟 exe 路径让 _find_adb_near_exe 从该目录开始搜索
+            dummy_exe = os.path.join(install_dir, "dummy.exe")
+            # 手动搜索：直接在安装目录及子目录找 adb.exe
+            for sub in ["", "shell", "nx_main", "vmonitor\\bin", "emulator\\nemu", "bin"]:
+                adb = os.path.join(install_dir, sub, "adb.exe") if sub else os.path.join(install_dir, "adb.exe")
+                if os.path.isfile(adb):
+                    found[name] = adb
+                    _adb_logger.info("注册表发现 %s ADB: %s", name, adb)
+                    break
+
+    # ===== 策略二：运行进程反推 =====
+    if "雷电" not in found or "MUMU" not in found:
+        process_results = _search_running_processes()
+        for name, path in process_results.items():
+            if name not in found:
+                found[name] = path
+
+    # ===== 策略三：全盘符路径模式扫描 =====
+    drives = _get_available_drives()
+
     # --- 雷电模拟器 (LDPlayer) ---
-    # 常见安装路径模式
-    ld_patterns = [
-        r"G:\leidian\LDPlayer*\adb.exe",
-        r"C:\leidian\LDPlayer*\adb.exe",
-        r"D:\leidian\LDPlayer*\adb.exe",
-        r"E:\leidian\LDPlayer*\adb.exe",
-        os.path.expandvars(r"%ProgramFiles%\LDPlayer*\adb.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\LDPlayer*\adb.exe"),
-    ]
-    for pattern in ld_patterns:
-        for path in glob.glob(pattern):
-            if os.path.isfile(path):
-                found["雷电"] = path
+    if "雷电" not in found:
+        ld_sub_patterns = [
+            r"leidian\LDPlayer*\adb.exe",
+            r"Program Files\LDPlayer*\adb.exe",
+            r"Program Files (x86)\LDPlayer*\adb.exe",
+            r"LDPlayer*\adb.exe",
+            r"ChangZhi\LDPlayer*\adb.exe",
+        ]
+        for drive in drives:
+            for sub in ld_sub_patterns:
+                pattern = os.path.join(drive, sub)
+                for path in glob.glob(pattern):
+                    if os.path.isfile(path):
+                        found["雷电"] = path
+                        _adb_logger.info("路径扫描发现雷电 ADB: %s", path)
+                        break
+                if "雷电" in found:
+                    break
+            if "雷电" in found:
+                break
 
     # --- MUMU 模拟器 ---
-    # MUMU 的 ADB 位于 NetEase\MuMu\nx_main 目录下
-    mumu_patterns = [
-        # 各盘符根目录
-        r"C:\NetEase\MuMu*\nx_main\adb.exe",
-        r"D:\NetEase\MuMu*\nx_main\adb.exe",
-        r"E:\NetEase\MuMu*\nx_main\adb.exe",
-        r"G:\NetEase\MuMu*\nx_main\adb.exe",
-        # Program Files
-        os.path.expandvars(r"%ProgramFiles%\NetEase\MuMu*\nx_main\adb.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\NetEase\MuMu*\nx_main\adb.exe"),
-        # 旧版 MUMU（shell 目录）
-        os.path.expandvars(r"%ProgramFiles%\MuMu*\shell\adb.exe"),
-        r"C:\Program Files\MuMu*\shell\adb.exe",
-        r"D:\Program Files\MuMu*\shell\adb.exe",
-        # MUMU 12 用户数据目录
-        os.path.expandvars(r"%LocalAppData%\Netease\MuMuPlayer*\shell\adb.exe"),
-    ]
-    for pattern in mumu_patterns:
-        for path in glob.glob(pattern):
-            if os.path.isfile(path):
-                found["MUMU"] = path
+    if "MUMU" not in found:
+        mumu_sub_patterns = [
+            # MUMU 12 — 注意大小写变体：NetEase / Netease / netease
+            r"NetEase\MuMu*\adb.exe",
+            r"Netease\MuMu*\adb.exe",
+            r"NetEase\MuMu*\shell\adb.exe",
+            r"Netease\MuMu*\shell\adb.exe",
+            # nx_main 子目录（MUMU 12 常见结构）
+            r"NetEase\MuMu*\nx_main\adb.exe",
+            r"Netease\MuMu*\nx_main\adb.exe",
+            r"NetEase\MuMu*\vmonitor\bin\adb.exe",
+            r"Netease\MuMu*\vmonitor\bin\adb.exe",
+            # Nemu 系列（MUMU 旧版内部名称）
+            r"NetEase\Nemu*\adb.exe",
+            r"Netease\Nemu*\adb.exe",
+            r"Nemu*\adb.exe",
+            # Program Files 安装
+            r"Program Files\NetEase\MuMu*\adb.exe",
+            r"Program Files (x86)\NetEase\MuMu*\adb.exe",
+            r"Program Files\NetEase\MuMu*\nx_main\adb.exe",
+            r"Program Files (x86)\NetEase\MuMu*\nx_main\adb.exe",
+            r"Program Files\Netease\MuMu*\nx_main\adb.exe",
+            r"Program Files (x86)\Netease\MuMu*\nx_main\adb.exe",
+            r"Program Files\Netease\MuMu*\adb.exe",
+            r"Program Files (x86)\Netease\MuMu*\adb.exe",
+            r"Program Files\NetEase\MuMu*\shell\adb.exe",
+            r"Program Files (x86)\NetEase\MuMu*\shell\adb.exe",
+            r"Program Files\Netease\MuMu*\shell\adb.exe",
+            r"Program Files (x86)\Netease\MuMu*\shell\adb.exe",
+            r"Program Files\MuMu*\shell\adb.exe",
+            r"Program Files (x86)\MuMu*\shell\adb.exe",
+            # 直接在盘符根目录
+            r"MuMu*\adb.exe",
+            r"MuMu*\shell\adb.exe",
+            r"MuMuPlayer*\shell\adb.exe",
+            r"MuMuPlayer*\adb.exe",
+        ]
+        # 额外搜索 %LocalAppData% 和 %AppData%
+        special_dirs = [
+            os.path.expandvars(r"%LocalAppData%"),
+            os.path.expandvars(r"%AppData%"),
+            os.path.expandvars(r"%ProgramData%"),
+        ]
+        for base_dir in special_dirs:
+            if not os.path.isdir(base_dir):
+                continue
+            for local_sub in [r"Netease\MuMu*\shell\adb.exe",
+                              r"Netease\MuMu*\adb.exe",
+                              r"NetEase\MuMu*\shell\adb.exe",
+                              r"NetEase\MuMu*\adb.exe",
+                              r"MuMuPlayer*\shell\adb.exe",
+                              r"MuMuPlayer*\adb.exe"]:
+                pattern = os.path.join(base_dir, local_sub)
+                for path in glob.glob(pattern):
+                    if os.path.isfile(path):
+                        found["MUMU"] = path
+                        _adb_logger.info("特殊目录发现 MUMU ADB: %s", path)
+                        break
+                if "MUMU" in found:
+                    break
+            if "MUMU" in found:
+                break
 
-    # --- 夜神模拟器 (Nox) ---
-    nox_patterns = [
-        os.path.expandvars(r"%ProgramFiles%\Nox\bin\nox_adb.exe"),
-        os.path.expandvars(r"%ProgramFiles(x86)%\Nox\bin\nox_adb.exe"),
-        r"D:\Program Files\Nox\bin\nox_adb.exe",
-    ]
-    for pattern in nox_patterns:
-        for path in glob.glob(pattern):
-            if os.path.isfile(path):
-                found["夜神 (Nox)"] = path
+        if "MUMU" not in found:
+            for drive in drives:
+                for sub in mumu_sub_patterns:
+                    pattern = os.path.join(drive, sub)
+                    for path in glob.glob(pattern):
+                        if os.path.isfile(path):
+                            found["MUMU"] = path
+                            _adb_logger.info("路径扫描发现 MUMU ADB: %s", path)
+                            break
+                    if "MUMU" in found:
+                        break
+                if "MUMU" in found:
+                    break
 
-    # --- 系统 ADB（通过 PATH 查找） ---
-    system_adb = shutil.which("adb")
-    if system_adb:
-        found["系统 ADB"] = os.path.abspath(system_adb)
+    if not found:
+        _adb_logger.warning("未找到任何模拟器 ADB，请在 GUI 中手动选择")
 
     return found
 
@@ -151,8 +412,8 @@ def scan_adb_paths():
 # 自动扫描结果缓存
 _scanned_adb = scan_adb_paths()
 
-# 当前使用的 ADB 路径（默认取第一个找到的，找不到则 fallback 到 "adb"）
-ADB_PATH = next(iter(_scanned_adb.values()), "adb")
+# 当前使用的 ADB 路径（默认取第一个扫描到的模拟器 ADB，找不到则留空触发 GUI 提示）
+ADB_PATH = next(iter(_scanned_adb.values()), "")
 
 
 def set_adb_path(path):
