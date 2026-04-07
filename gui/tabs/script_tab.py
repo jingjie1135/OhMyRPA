@@ -850,6 +850,8 @@ class ScriptTab(QWidget):
         from gui.template_gallery_dialog import TemplateGalleryWidget
         
         pictures_dir = self.current_model.pictures_dir
+        # 防御性创建：确保 Pictures 目录存在（用户可能新建脚本后立即操作图库）
+        os.makedirs(pictures_dir, exist_ok=True)
         
         # 构造当前模板列表
         if mode == "single":
@@ -925,6 +927,7 @@ class ScriptTab(QWidget):
         vl.addWidget(hint)
         
         sw = ScreenshotWidget()
+        os.makedirs(self.current_model.pictures_dir, exist_ok=True)
         sw.custom_save_dir = self.current_model.pictures_dir
         # 传入干净原图（裁切不含标记），十字准心仅在 paintEvent 中叠加
         sw.update_screenshot(QImage(snapshot_path))

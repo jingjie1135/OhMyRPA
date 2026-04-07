@@ -316,6 +316,8 @@ class TemplateGalleryWidget(QWidget):
         """绑定主窗口的 ScreenshotWidget，设置截图保存目录"""
         self._screenshot_widget = sw
         self._prev_save_dir = sw.custom_save_dir
+        # 确保保存目录存在（新建脚本后可能还未创建）
+        os.makedirs(self.pictures_dir, exist_ok=True)
         sw.custom_save_dir = self.pictures_dir
         sw.template_saved.connect(self._on_template_saved)
 
