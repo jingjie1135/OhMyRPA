@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._workers = []              # 并发执行的多个工作线程
+        self._workflow_runner = None     # 流程批次编排线程
         self._runtime_config = None     # 运行时参数引用
         self._last_picked_coord = None  # 最近一次拾取的坐标
         self._screencap_worker = None   # 截图后台线程
@@ -638,6 +639,7 @@ class MainWindow(QMainWindow):
         # 判断当前 Tab 决定执行模式
         current_tab = self.tab_widget.currentWidget()
         is_loop_mode = isinstance(current_tab, LoopScriptTab)
+        is_workflow_mode = isinstance(current_tab, WorkflowTab)
         
         if is_loop_mode:
             if not self.loop_tab.current_model:
@@ -646,6 +648,26 @@ class MainWindow(QMainWindow):
                 return
             script_model = self.loop_tab.current_model
             enabled_templates = self.loop_tab.get_enabled_templates()
+        elif is_workflow_mode:
+            # 流程模式
+            wf_model = self.workflow_tab.current_model
+            if not wf_model or not wf_model.steps:
+                self._append_log("请先在流程 Tab 中添加执行步骤")
+                self.start_btn.setChecked(False)
+                return
+
+            # 有批次配置时，使用 WorkflowRunner 按批次执行
+            if wf_model.batches:
+                self._start_workflow_runner(wf_model)
+                return
+
+            # 无批次，退化为在当前设备上单独执行
+            from script_model import ScriptModel
+            script_model = ScriptModel(name=f"流程:{wf_model.name}")
+            script_model.actions = list(wf_model.steps)
+            if wf_model.pictures_dir:
+                script_model.project_dir = wf_model.project_dir
+            enabled_templates = None
         else:
             script_model = self.script_tab.current_model
             enabled_templates = None
@@ -710,6 +732,28 @@ class MainWindow(QMainWindow):
         self.device_combo.setEnabled(False)
         self._buy_count = 0
 
+    def _start_workflow_runner(self, wf_model):
+        """使用 WorkflowRunner 按批次执行流程。"""
+        from workflow_runner import WorkflowRunner
+
+        self._workflow_runner = WorkflowRunner(wf_model, parent=self)
+        self._workflow_runner.log_signal.connect(self._append_log)
+        self._workflow_runner.status_signal.connect(self._update_status)
+        self._workflow_runner.batch_progress_signal.connect(
+            lambda cur, total: self._update_status(f"批次 {cur}/{total}")
+        )
+        self._workflow_runner.finished_signal.connect(self._on_worker_finished)
+        self._workflow_runner.start()
+
+        # UI 状态更新
+        self.start_btn.setText("⏹ 停止")
+        self.start_btn.setObjectName("dangerBtn")
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
+        self.pause_btn.setEnabled(False)  # 批次模式暂不支持暂停
+        self.tab_widget.tabBar().setEnabled(False)
+        self.device_combo.setEnabled(False)
+
     def _on_pause(self):
         """暂停/继续按钮。"""
         if not self._workers:
@@ -728,7 +772,14 @@ class MainWindow(QMainWindow):
             self._append_log("所有设备已暂停")
 
     def _do_stop(self):
-        """停止工作线程（手册 §六资源保护）。"""
+        """停止工作线程。"""
+        # 停止 WorkflowRunner（如果有）
+        if self._workflow_runner and self._workflow_runner.isRunning():
+            self._append_log("正在停止流程执行...")
+            self._workflow_runner.stop()
+            self._workflow_runner.wait(10000)
+            return
+
         if not self._workers:
             return
 
@@ -744,12 +795,16 @@ class MainWindow(QMainWindow):
     def _on_worker_finished(self):
         """工作线程结束后的清理。"""
         sender_worker = self.sender()
-        if sender_worker in self._workers:
+
+        # WorkflowRunner 完成
+        if sender_worker is self._workflow_runner:
+            self._workflow_runner = None
+            # 继续执行下方的 UI 恢复逻辑
+        elif sender_worker in self._workers:
             self._workers.remove(sender_worker)
-            
-        # 只有当所有 worker 全部跑完后，才恢复 UI
-        if len(self._workers) > 0:
-            return
+            # 只有当所有 worker 全部跑完后，才恢复 UI
+            if len(self._workers) > 0:
+                return
 
         self._sync_timer.stop()
         self._runtime_config = None

@@ -330,6 +330,52 @@ class ScriptEngine:
             else:
                 self._log("🔍 多图匹配: 画面中未检出任何匹配目标")
 
+        elif action_type == "run_script":
+            # 执行外部脚本项目：加载引用的脚本并递归执行其所有步骤
+            script_project = p.get("script_project", "")
+            if not script_project:
+                self._log("⚠️ 执行脚本指令未配置脚本项目名，跳过。")
+                return
+
+            self._log(f"📜 开始执行脚本: [{script_project}]")
+            project_dir = os.path.join(ScriptModel.SCRIPTS_ROOT, script_project)
+            if not os.path.isdir(project_dir):
+                self._log(f"❌ 脚本项目不存在: {project_dir}")
+                return
+
+            try:
+                sub_model = ScriptModel.load_from_project(project_dir)
+            except Exception as e:
+                self._log(f"❌ 加载脚本失败: {e}")
+                return
+
+            if not sub_model.actions:
+                self._log(f"⚠️ 脚本 [{script_project}] 没有步骤，跳过。")
+                return
+
+            # 创建子引擎，复用当前的设备适配器、暂停/中断控制和回调
+            sub_engine = ScriptEngine(
+                model=sub_model,
+                device_id=self.device_id,
+                pause_event=self.pause_event,
+                interrupt_check=self.interrupt_check,
+                callbacks=self.callbacks,
+                adapter=self._adapter,
+            )
+
+            # 判断是否为循环脚本（config 中有循环配置）
+            cfg = sub_model.config
+            if getattr(cfg, 'max_loops', 0) > 0 or getattr(cfg, 'scan_interval', 0) > 0:
+                self._log(f"🔄 脚本 [{script_project}] 以循环模式执行")
+                sub_engine.run_loop()
+            else:
+                # 线性执行所有步骤
+                for sub_action in sub_model.actions:
+                    self._check_interrupt_and_pause()
+                    sub_engine._execute_action(sub_action)
+
+            self._log(f"📜 脚本 [{script_project}] 执行完毕")
+
         else:
             self._log(f"⚠️ 未知指令类型: [{action_type}]，已跳过。")
 

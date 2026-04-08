@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 
 ACTION_REGISTRY = {
     # type_key: (icon, display_name, category)
+    "run_script":    ("📜", "执行脚本",   "脚本编排"),
     "tap":           ("🖱", "点击坐标",   "基础动作"),
     "swipe":         ("👆", "滑动操作",   "基础动作"),
     "sleep":         ("⏱",  "延时等待",   "基础动作"),
@@ -81,6 +82,9 @@ def format_action_text(node) -> str:
         return "⌂ 主页键"
     elif t == "app_switch":
         return "⎕ 多任务键"
+    elif t == "run_script":
+        project = p.get("script_project", "未选择")
+        return f"📜 执行: {project}"
     else:
         return f"❓ {t}"
 
@@ -418,10 +422,63 @@ def build_system_key_props(layout: QFormLayout, node, update_fn, context: dict =
     layout.addRow(QLabel("此操作没有可配置的参数。"))
 
 
+def build_run_script_props(layout: QFormLayout, node, update_fn, context: dict = None):
+    """执行脚本 — 属性面板（选择脚本项目 + 只读信息）"""
+    from script_model import ScriptModel
+
+    current_project = node.params.get("script_project", "")
+
+    # 脚本选择下拉框
+    combo = QComboBox()
+    combo.setMinimumWidth(140)
+    projects = ScriptModel.list_projects()
+    combo.addItem("-- 请选择 --", "")
+    for p_name in projects:
+        combo.addItem(p_name, p_name)
+
+    # 设置当前选中
+    idx = combo.findData(current_project)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+    # 脚本信息标签（只读）
+    info_label = QLabel("")
+    info_label.setStyleSheet("color: #888; font-size: 11px;")
+    info_label.setWordWrap(True)
+
+    def _update_info(project_name):
+        """更新脚本信息显示"""
+        if not project_name:
+            info_label.setText("请选择一个脚本项目")
+            return
+        try:
+            import os
+            project_dir = os.path.join(ScriptModel.SCRIPTS_ROOT, project_name)
+            model = ScriptModel.load_from_project(project_dir)
+            res = model.config.resolution or "未设置"
+            steps = len(model.actions)
+            info_label.setText(f"分辨率: {res}\n步骤数: {steps}")
+        except Exception:
+            info_label.setText("无法读取脚本信息")
+
+    def _on_combo_changed(index):
+        project_name = combo.itemData(index) or ""
+        update_fn("script_project", project_name)
+        _update_info(project_name)
+
+    combo.currentIndexChanged.connect(_on_combo_changed)
+    layout.addRow("脚本:", combo)
+
+    # 初始化信息
+    _update_info(current_project)
+    layout.addRow(info_label)
+
+
 # =================== 统一分派 ===================
 
 # 各指令类型对应的构建函数
 _BUILDERS = {
+    "run_script": build_run_script_props,
     "tap": build_tap_props,
     "sleep": build_sleep_props,
     "swipe": build_swipe_props,
