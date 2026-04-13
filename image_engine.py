@@ -189,11 +189,43 @@ def match_all(screen, templates, threshold=None):
             logger.warning("模板 [%s] 尺寸(%dx%d)超过截图，跳过", name, tmpl_w, tmpl_h)
             continue
 
-        # 使用归一化互相关系数进行模板匹配（速度与精度兼顾）
+        # 使用归一化互相关系数进行模板匹配（彩色模式）
         result = cv2.matchTemplate(screen, tmpl, cv2.TM_CCOEFF_NORMED)
 
         # 找出所有超过阈值的匹配位置
         locations = np.where(result >= threshold)
+        
+        # 触发灰度+多尺度匹配回退机制的条件：
+        # 如果当前精准匹配失败，说明可能跨模拟器实例存在微小的缩放或色彩渲染偏差。
+        # 不随意降低阈值，而是尝试微小的多尺度缩放（98%, 99%, 101%, 102%）在灰度空间进行匹配。
+        if len(locations[0]) == 0:
+            gray_screen = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+            gray_tmpl = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY)
+            
+            # 原始 1.0 比例灰度匹配
+            result = cv2.matchTemplate(gray_screen, gray_tmpl, cv2.TM_CCOEFF_NORMED)
+            locations = np.where(result >= threshold)
+            
+            # 如果 1.0 灰度还是不行，开启微尺度轮询
+            if len(locations[0]) == 0:
+                scales = [0.98, 0.99, 1.01, 1.02]
+                for scale in scales:
+                    new_w = int(gray_tmpl.shape[1] * scale)
+                    new_h = int(gray_tmpl.shape[0] * scale)
+                    # 如果缩放后比屏幕还大，跳过
+                    if new_w <= 0 or new_h <= 0 or new_w > gray_screen.shape[1] or new_h > gray_screen.shape[0]:
+                        continue
+                        
+                    scaled_tmpl = cv2.resize(gray_tmpl, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                    res = cv2.matchTemplate(gray_screen, scaled_tmpl, cv2.TM_CCOEFF_NORMED)
+                    locs = np.where(res >= threshold)
+                    
+                    if len(locs[0]) > 0:
+                        # 找到了！我们要把匹配框修正回未缩放的原本尺寸（为了外层统一拿 tmpl_w, tmpl_h 读取中心点）
+                        # cv2.matchTemplate 返回的是左上角坐标，这里把匹配到的左上角传出去
+                        locations = locs
+                        tmpl_w, tmpl_h = new_w, new_h  # 更新为实际找到的特征尺寸
+                        break
 
         for pt_y, pt_x in zip(*locations):
             # 计算匹配区域的中心坐标

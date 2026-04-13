@@ -170,7 +170,15 @@ class ScriptEngine:
             
             if not target_tmpl:
                 self._log(f"⚠️ 未找到模板文件: [{template}]")
+                self._log(f"   解析路径: {template_path}")
+                self._log(f"   Pictures目录: {self.model.pictures_dir}")
                 return
+            
+            # 诊断用：跟踪匹配过程中的最高分数
+            _diag_max_score = 0.0
+            _diag_frame_count = 0
+            _diag_frame_size = ""
+            _diag_tmpl_size = f"{target_tmpl[0][1].shape[1]}x{target_tmpl[0][1].shape[0]}"
             
             while time.time() - start_time < timeout:
                 self._check_interrupt_and_pause()
@@ -178,11 +186,22 @@ class ScriptEngine:
                 if img is None:
                     time.sleep(0.5)
                     continue
+                
+                _diag_frame_count += 1
+                _diag_frame_size = f"{img.shape[1]}x{img.shape[0]}"
                     
                 if 'on_screenshot' in self.callbacks:
                     self.callbacks['on_screenshot'](img)
                     
                 matches = image_engine.match_all(img, target_tmpl, threshold)
+                
+                # 诊断：即使未匹配也获取最高分数
+                if not matches:
+                    import cv2
+                    _res = cv2.matchTemplate(img, target_tmpl[0][1], cv2.TM_CCOEFF_NORMED)
+                    _cur_max = float(_res.max())
+                    if _cur_max > _diag_max_score:
+                        _diag_max_score = _cur_max
                 
                 if matches:
                     name, cx, cy, score = matches[0]
@@ -202,6 +221,10 @@ class ScriptEngine:
                 
             if not found:
                 self._log(f"⚠️ 寻找图片超时: [{template}]")
+                self._log(f"   📊 诊断: 模板={_diag_tmpl_size}, 截图={_diag_frame_size}, "
+                          f"截图帧数={_diag_frame_count}, 最高匹配={_diag_max_score:.4f}, 阈值={threshold}")
+                self._log(f"   📁 模板路径: {os.path.abspath(template_path)}")
+                self._log(f"   🔌 设备: {self.device_id}")
                 self.consecutive_fails += 1
                 if self.model.config.popup_guard and self.consecutive_fails >= self.model.config.guard_trigger_fails:
                     self._run_popup_guard()

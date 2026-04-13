@@ -102,10 +102,23 @@ class WorkflowRunner(QThread):
                 if dev.device_type in ("ldplayer", "mumu") and not dev.running:
                     self._log(f"  ▶ 启动 {dev.name} (索引 {dev.index})...")
                     EmulatorManager.launch(dev)
+                    dev.running = True
                 elif dev.device_type == "phone":
                     self._log(f"  📱 {dev.name} 为手机设备，无需启动。")
                 else:
                     self._log(f"  ✅ {dev.name} 已在运行中。")
+                
+                # 修复：如果设备在被选入批次时未运行，device_id 会为空。
+                # 启动后需要根据模拟器类型和索引动态计算 ADB 连接地址。
+                if not dev.device_id and dev.index >= 0:
+                    if dev.device_type == "ldplayer":
+                        # 雷电模拟器 ADB 端口规律：5555 + index * 2
+                        dev.device_id = f"emulator-{5554 + dev.index * 2}"
+                        self._log(f"  🔗 动态分配 ADB 地址: {dev.device_id}")
+                    elif dev.device_type == "mumu":
+                        # MuMu 使用 adb devices 扫描的格式
+                        dev.device_id = f"127.0.0.1:{7555 + dev.index * 10}"
+                        self._log(f"  🔗 动态分配 ADB 地址: {dev.device_id}")
 
             if self._stopped:
                 break
