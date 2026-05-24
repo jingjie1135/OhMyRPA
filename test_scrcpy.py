@@ -1,6 +1,9 @@
-import socket, subprocess, time, sys
+import socket
+import subprocess
+import sys
+from pathlib import Path
 
-sys.path.insert(0, "g:/Users/Administrator/Documents/AI/antigravity/游戏脚本/百龙霸业/0.1")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 adb = config.ADB_PATH
