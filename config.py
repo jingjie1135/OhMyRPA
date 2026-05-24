@@ -1,10 +1,13 @@
 """
 配置文件：集中管理所有可调参数，与业务逻辑分离。
-用户可直接修改此文件中的常量来适配不同游戏/模拟器环境。
+用户可直接修改此文件中的常量来适配不同应用/模拟器环境。
 """
 
 import os
 import sys
+import glob
+import logging
+import string
 
 # ===================== 路径配置 =====================
 # 打包后（Nuitka --onefile）：__file__ 指向临时解压目录，需使用 exe 所在目录
@@ -14,7 +17,7 @@ if getattr(sys, 'frozen', False) or '__compiled__' in dir():
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 目标物品图库目录
+# 目标模板图库目录
 TARGETS_DIR = os.path.join(BASE_DIR, "targets")
 
 # 弹窗关闭按钮图库目录
@@ -47,10 +50,10 @@ MATCH_THRESHOLD = 0.8
 NMS_IOU_THRESHOLD = 0.3
 
 # ===================== 点击坐标配置 =====================
-# 物品图标中心 → 购买按钮的 Y 轴向下偏移量（像素）
+# 模板命中中心 → 后续点击点的默认 Y 轴偏移量（像素）
 Y_OFFSET = 130
 
-# "20元宝刷新"按钮的固定坐标 (x, y)
+# 默认刷新/重试按钮的固定坐标 (x, y)
 REFRESH_BTN_POS = (640, 400)
 
 # 盲点兜底：安全空白区域点击坐标
@@ -67,7 +70,7 @@ ERROR_SLEEP = 10
 # 每次点击后的极短等待（秒），追求极速但给予系统最小响应时间
 CLICK_DELAY = 0.05
 
-# 刷新商店后等待画面加载（秒）
+# 刷新/重试后等待画面加载（秒）
 REFRESH_WAIT = 0.5
 
 # 主循环每轮间隔（秒），避免 CPU 空转
@@ -78,10 +81,6 @@ LOOP_INTERVAL = 0.1
 MAX_WORKERS = 4
 
 # ===================== ADB 配置 =====================
-
-import glob
-import string
-import logging
 
 _adb_logger = logging.getLogger(__name__)
 
@@ -283,8 +282,6 @@ def scan_adb_paths():
     for name, install_dir in registry_dirs.items():
         if name not in found:
             # 统一使用智能查找，兼容各种子目录结构
-            # 先构造一个虚拟 exe 路径让 _find_adb_near_exe 从该目录开始搜索
-            dummy_exe = os.path.join(install_dir, "dummy.exe")
             # 手动搜索：直接在安装目录及子目录找 adb.exe
             for sub in ["", "shell", "nx_main", "vmonitor\\bin", "emulator\\nemu", "bin"]:
                 adb = os.path.join(install_dir, sub, "adb.exe") if sub else os.path.join(install_dir, "adb.exe")

@@ -22,7 +22,7 @@ class DeviceAdapter(ABC):
     """
     统一设备交互接口（抽象基类）。
 
-    所有调用方（script_engine、shop_bot、widgets 等）仅依赖此接口，
+    所有调用方（script_engine、widgets 等）仅依赖此接口，
     不直接调用 adb_utils 或 scrcpy_client。
     """
 

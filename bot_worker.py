@@ -5,8 +5,7 @@ QThread 工作线程：桥接 GUI 界面与业务逻辑。
 
 import threading
 import cv2
-import numpy as np
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from script_engine import ScriptEngine
@@ -15,7 +14,7 @@ from script_model import ScriptModel
 
 class BotWorker(QThread):
     """
-    神秘商店扫货工作线程。
+    通用脚本执行工作线程。
     继承 QThread，使用 pyqtSignal 发射状态到 GUI 主线程。
     """
 
