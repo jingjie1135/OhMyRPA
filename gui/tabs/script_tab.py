@@ -11,11 +11,10 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, 
     QGroupBox, QLabel, QPushButton, QComboBox, QCheckBox,
-    QSplitter, QListWidget, QTreeWidget, QTreeWidgetItem, QStackedWidget,
+    QSplitter, QListWidget, QTreeWidget, QTreeWidgetItem,
     QInputDialog
 )
 
-from gui.constants import create_font
 from script_model import ScriptModel, ActionNode
 
 
@@ -203,9 +202,6 @@ class ScriptTab(QWidget):
         if not action_type:
             return  # 点击的是分类项
 
-        from PyQt6.QtWidgets import QListWidgetItem
-        from script_model import ActionNode
-        
         # 常见初始参数模板
         default_params = {
             "tap": {"x": 0, "y": 0},
@@ -413,41 +409,6 @@ class ScriptTab(QWidget):
             )
             return False
         return True
-
-    def on_recorded_click(self, device_id: str, x: int, y: int):
-        """主窗口拦截点击后，调用的录制钩子"""
-        # 暂停状态下忽略点击
-        if self._recording_paused:
-            return
-        
-        # 分辨率门禁检查
-        if not self._check_recording_resolution(device_id):
-            return
-        
-        # 最小间隔保护 1 秒
-        import time
-        now = time.time()
-        if self.last_record_time > 0 and (now - self.last_record_time) < 1.0:
-            # 在日志区提示（通过 main_window）
-            main_win = self.window()
-            if hasattr(main_win, '_append_log'):
-                main_win._append_log("⚠️ 操作过快（<1s），已忽略。过快点击可能导致识图失败。")
-            return
-        
-        # 启动后台线程执行 ADB 截图 + 点击
-        worker = _RecordClickWorker(
-            device_id, x, y,
-            temp_dir=self.current_model.temp_dir,
-            enable_snapshot=self._enable_snapshot,
-            parent=self
-        )
-        worker.finished.connect(self._on_record_click_done)
-        if not hasattr(self, '_record_workers'):
-            self._record_workers = []
-        self._record_workers.append(worker)
-        worker.finished.connect(lambda: self._record_workers.remove(worker))
-        worker.start()
-        self._refresh_action_list_text()
 
     def on_recorded_swipe(self, device_id: str, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300, path: list = None):
         """记录滑动动作：如果有完整轨迹则保留完整轨迹用于高精度重放"""
@@ -703,7 +664,8 @@ class ScriptTab(QWidget):
             item = self.action_list.item(i)
             node_id = item.data(Qt.ItemDataRole.UserRole)
             node = next((n for n in self.current_model.actions if n.id == node_id), None)
-            if not node: continue
+            if not node:
+                continue
             item.setText(f"{i+1}. {format_action_text(node)}")
 
     def _show_script_config(self):
@@ -786,7 +748,7 @@ class ScriptTab(QWidget):
 
     def _create_props_widget(self, node) -> QWidget:
         """根据 ActionNode 类型动态生成参数配置面板（统一调用 action_props）"""
-        from PyQt6.QtWidgets import QFormLayout, QLineEdit, QVBoxLayout
+        from PyQt6.QtWidgets import QFormLayout, QVBoxLayout
         from gui.action_props import build_action_props, append_comment_row
 
         wrapper = QWidget()
@@ -999,7 +961,6 @@ class ScriptTab(QWidget):
 
     # ================= 兼容层面方法 =================
     def get_runtime_config(self):
-        """兼容层：返回空配置对象，已不再依赖 shop_bot 模块。"""
         return None
 
     def sync_to_runtime_config(self, config):
