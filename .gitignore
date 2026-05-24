@@ -30,6 +30,7 @@ Desktop.ini
 
 # Gemini / AI 工具
 .gemini/
+.omo/
 
 # 模板图片（用户运行时创建的外部数据）
 targets/
