@@ -12,6 +12,7 @@
 import time
 import threading
 import os
+import copy
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -162,9 +163,12 @@ class WorkflowRunner(QThread):
             for dev in ready_devices:
                 if self._stopped:
                     break
+                # 每台设备使用独立的步骤副本，避免多设备并发共享同一批 ActionNode
+                # （执行器未来若写入 params 也不会互相串改）
+                dev_model = copy.deepcopy(script_model)
                 t = threading.Thread(
                     target=self._run_on_device,
-                    args=(dev, script_model, pause_event),
+                    args=(dev, dev_model, pause_event),
                     name=f"Engine-{dev.name}",
                     daemon=True,
                 )

@@ -26,9 +26,14 @@ class ActionNode:
         
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ActionNode':
+        if not isinstance(data, dict):
+            raise ValueError(f"动作节点数据格式错误，应为对象而非 {type(data).__name__}")
+        params = data.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
         node = cls(
-            action_type=data.get("type", "unknown"),
-            params=data.get("params", {}),
+            action_type=str(data.get("type", "unknown")),
+            params=params,
             action_id=data.get("id"),
             comment=data.get("comment", "")
         )
@@ -65,14 +70,23 @@ class ScriptConfig:
         
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ScriptConfig':
+        if not isinstance(data, dict):
+            data = {}
+
+        def _num(key, default, cast):
+            try:
+                return cast(data.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
         return cls(
-            popup_guard=data.get("popup_guard", True),
-            guard_dir=data.get("guard_dir", "popups"),
-            guard_trigger_fails=data.get("guard_trigger_fails", 3),
+            popup_guard=bool(data.get("popup_guard", True)),
+            guard_dir=data.get("guard_dir", "popups") or "popups",
+            guard_trigger_fails=_num("guard_trigger_fails", 3, int),
             resolution=data.get("resolution", ""),
-            check_resolution=data.get("check_resolution", True),
-            scan_interval=data.get("scan_interval", 1.0),
-            max_loops=data.get("max_loops", 0)
+            check_resolution=bool(data.get("check_resolution", True)),
+            scan_interval=_num("scan_interval", 1.0, float),
+            max_loops=_num("max_loops", 0, int)
         )
 
 class ScriptModel:
@@ -134,14 +148,17 @@ class ScriptModel:
         
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ScriptModel':
+        if not isinstance(data, dict):
+            raise ValueError("脚本数据格式错误：根对象应为 JSON 对象")
         model = cls(
             name=data.get("script_name", "未知脚本"),
             version=data.get("version", "1.0")
         )
-        if "config" in data:
+        if isinstance(data.get("config"), dict):
             model.config = ScriptConfig.from_dict(data["config"])
-        if "actions" in data:
-            model.actions = [ActionNode.from_dict(a) for a in data["actions"]]
+        actions_data = data.get("actions", [])
+        if isinstance(actions_data, list):
+            model.actions = [ActionNode.from_dict(a) for a in actions_data if isinstance(a, dict)]
         return model
         
     def internalize_image(self, external_path: str) -> str:
@@ -182,31 +199,47 @@ class ScriptModel:
                 import image_engine
                 image_engine.clear_cache(self.pictures_dir)
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).debug("内化图片后清理模板缓存失败", exc_info=True)
         
         return filename
     
+    def _internalize_template_value(self, template: str) -> str:
+        """对单个模板路径执行内化，返回内化后的文件名；非外部绝对路径原样返回。"""
+        if not template or not os.path.isabs(template):
+            return template
+        pics_abs = os.path.abspath(self.pictures_dir)
+        abs_template = os.path.abspath(template)
+        # 已在项目内的绝对路径也需简化为文件名；项目外的绝对路径需复制进来
+        if abs_template.startswith(pics_abs + os.sep) or not abs_template.startswith(os.path.abspath(self.project_dir)):
+            return self.internalize_image(template)
+        return template
+
+    def _internalize_params(self, action_type, params):
+        """内化单个动作 params 中引用的所有模板（含 multi_match 的 templates 与嵌套 sub_actions）。"""
+        if not isinstance(params, dict):
+            return
+        if action_type in ("find_and_tap", "wait_image"):
+            params["template"] = self._internalize_template_value(params.get("template", ""))
+        elif action_type == "multi_match":
+            for tpl_info in params.get("templates", []):
+                if isinstance(tpl_info, dict):
+                    tpl_info["template"] = self._internalize_template_value(tpl_info.get("template", ""))
+            for sub in params.get("sub_actions", []):
+                if isinstance(sub, dict):
+                    self._internalize_params(sub.get("type"), sub.get("params", {}))
+
     def internalize_all_images(self):
         """
-        遍历所有 actions，将 find_and_tap / wait_image 中的外部绝对路径
-        自动内化为项目内相对路径（仅文件名）。
+        遍历所有 actions，将动作引用的外部绝对路径图片自动内化为项目内相对路径
+        （仅文件名）。覆盖 find_and_tap / wait_image 的 template，以及 multi_match
+        的 templates 列表与嵌套 sub_actions。
         """
         if not self.project_dir:
             return
-        
+
         for action in self.actions:
-            if action.type in ("find_and_tap", "wait_image"):
-                template = action.params.get("template", "")
-                if not template:
-                    continue
-                # 检测是否为外部绝对路径
-                if os.path.isabs(template):
-                    pics_abs = os.path.abspath(self.pictures_dir)
-                    abs_template = os.path.abspath(template)
-                    # 已在项目内的绝对路径也需简化为文件名
-                    if abs_template.startswith(pics_abs + os.sep) or not abs_template.startswith(os.path.abspath(self.project_dir)):
-                        new_name = self.internalize_image(template)
-                        action.params["template"] = new_name
+            self._internalize_params(action.type, action.params)
 
     def save(self):
         """保存到当前项目目录，自动创建所需子目录结构并内化外部图片引用。"""
@@ -237,6 +270,19 @@ class ScriptModel:
             return model
     
     @classmethod
+    def is_safe_project_name(cls, name: str) -> bool:
+        """校验脚本项目名不会越出 Scripts/ 根目录（防目录遍历）。"""
+        if not name:
+            return False
+        scripts_root = os.path.abspath(cls.SCRIPTS_ROOT)
+        target = os.path.abspath(os.path.join(scripts_root, name))
+        try:
+            return os.path.commonpath([scripts_root, target]) == scripts_root and target != scripts_root
+        except ValueError:
+            # 不同盘符（如传入绝对路径 C:\...）→ commonpath 抛错 → 判为不安全
+            return False
+
+    @classmethod
     def list_projects(cls) -> List[str]:
         """扫描 Scripts/ 目录下的所有脚本项目名称（已缓存友好）。"""
         root = cls.SCRIPTS_ROOT
@@ -263,7 +309,12 @@ class ScriptModel:
         """
         if target_name is None:
             target_name = os.path.basename(source_dir.rstrip(os.sep))
-        
+
+        # 路径安全：只取末段名并校验，拒绝越出 Scripts/ 的目录遍历
+        target_name = os.path.basename(target_name.rstrip("/\\")) or target_name
+        if not cls.is_safe_project_name(target_name):
+            raise ValueError(f"非法的导入项目名（疑似路径遍历）: {target_name}")
+
         target_dir = os.path.join(cls.SCRIPTS_ROOT, target_name)
         
         # 防止覆盖已有项目：自动追加编号

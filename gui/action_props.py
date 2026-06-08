@@ -28,8 +28,6 @@ ACTION_REGISTRY = {
     "find_and_tap":  ("🔍", "找图点击",   "图像识别"),
     "multi_match":   ("🎯", "多图点击",   "图像识别"),
     "wait_image":    ("⏳", "找图等待",   "图像识别"),
-    "loop_start":    ("🔄", "循环开始",   "流程控制"),
-    "loop_end":      ("🔚", "循环结束",   "流程控制"),
     "back":          ("◀", "返回键",     "系统按键"),
     "home":          ("⌂", "主页键",     "系统按键"),
     "app_switch":    ("⎕", "多任务键",   "系统按键"),
@@ -72,10 +70,6 @@ def format_action_text(node) -> str:
         x1, y1 = p.get('x1', 0), p.get('y1', 0)
         x2, y2 = p.get('x2', 0), p.get('y2', 0)
         return f"👆 滑动 ({x1},{y1})→({x2},{y2})"
-    elif t == "loop_start":
-        return "🔄 循环开始"
-    elif t == "loop_end":
-        return "🔚 循环结束"
     elif t == "back":
         return "◀ 返回键"
     elif t == "home":
@@ -702,80 +696,4 @@ def _add_test_swipe_btn(layout, node, context):
         if hasattr(main_win, '_append_log'):
             main_win._append_log(f"🧪 测试直线滑动 ({x1}, {y1}) → ({x2}, {y2}) {dur}ms")
     test_btn.clicked.connect(_test_swipe)
-    layout.addRow(test_btn)
-
-
-def _add_test_find_btn(layout, node, context):
-    """添加「测试找图点击」按钮"""
-    ctx = context or {}
-    main_win = ctx.get("main_win")
-    pictures_dir = ctx.get("pictures_dir", "")
-    if not main_win:
-        return
-
-    test_btn = QPushButton("🧪 测试找图点击")
-    test_btn.setToolTip("截图一次并尝试匹配点击")
-    def _test_find_and_tap():
-        # ------- 主线程：参数校验 -------
-        def _log(msg):
-            if hasattr(main_win, '_append_log'):
-                main_win._append_log(msg)
-
-        device_id = main_win.device_combo.currentText() if hasattr(main_win, 'device_combo') else ''
-        if not device_id:
-            _log("🧪 测试失败：请先选择设备")
-            return
-        tpl = node.params.get('template', '')
-        if not tpl:
-            _log("🧪 测试失败：请先设置模板图片")
-            return
-        tpl_path = tpl
-        if not os.path.exists(tpl_path):
-            tpl_path = os.path.join(pictures_dir, tpl)
-        if not os.path.exists(tpl_path):
-            _log(f"🧪 测试失败：模板文件不存在 [{tpl_path}]")
-            return
-
-        _log(f"🧪 正在截图并匹配 [{os.path.basename(tpl_path)}]...")
-
-        # ------- 后台线程：阻塞 ADB 截图 + 匹配 -------
-        import threading
-        def _do_test():
-            try:
-                from adb_utils import screencap_to_memory, tap as adb_tap
-                import image_engine
-                import template_meta
-
-                tpl_dir = os.path.dirname(tpl_path) or '.'
-                # 测试时强制清除缓存，确保新增模板能被加载
-                image_engine.clear_cache(tpl_dir)
-                loaded = image_engine.load_templates(tpl_dir)
-                target_name = os.path.splitext(os.path.basename(tpl_path))[0]
-                target = [t for t in loaded if t[0] == target_name]
-                if not target:
-                    print(f"[测试找图] 模板加载失败: {tpl}")
-                    return
-
-                img = screencap_to_memory(device_id)
-                if img is None:
-                    print("[测试找图] ADB 截图返回 None")
-                    return
-
-                th = node.params.get('threshold', 0.9)
-                matches = image_engine.match_all(img, target, th)
-                if matches:
-                    name, cx, cy, score = matches[0]
-                    meta = template_meta.get(pictures_dir, os.path.basename(tpl))
-                    ox = meta.get('offset_x', 0)
-                    oy = meta.get('offset_y', 0)
-                    final_x, final_y = cx + ox, cy + oy
-                    adb_tap(device_id, final_x, final_y)
-                    print(f"[测试找图] 匹配成功 {score:.2f}，已点击 ({final_x}, {final_y})")
-                else:
-                    print("[测试找图] 未匹配到图片")
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-        threading.Thread(target=_do_test, daemon=True).start()
-    test_btn.clicked.connect(_test_find_and_tap)
     layout.addRow(test_btn)

@@ -164,7 +164,11 @@ class AdbAdapter(DeviceAdapter):
         keyevent(self._device_id, 187)
 
     def set_display_power(self, on: bool) -> None:
-        """ADB无法直接精准设置屏幕电源，只能发送 power 按键翻转状态"""
+        """切换屏幕电源（亮/灭）。
+
+        注意：ADB 只能发送 KEYCODE_POWER 翻转当前状态，无法按 on 精准设置。
+        因此 `on` 参数被忽略，本方法实际是 toggle 语义，调用方不要假设其幂等。
+        """
         from adb_utils import keyevent
         keyevent(self._device_id, 26) # KEYCODE_POWER
 

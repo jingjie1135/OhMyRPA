@@ -392,7 +392,8 @@ class ImageLibraryTab(QWidget):
         w, h = q_img_rgb.width(), q_img_rgb.height()
         ptr = q_img_rgb.bits()
         ptr.setsize(h * w * 3)
-        arr = np.array(ptr).reshape(h, w, 3)
+        # .copy() 确保数组拥有独立缓冲，不悬挂引用 QImage 的内存
+        arr = np.array(ptr).reshape(h, w, 3).copy()
         screen_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
         # 加载选中的模板

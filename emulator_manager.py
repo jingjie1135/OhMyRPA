@@ -103,13 +103,18 @@ def _find_mumu_manager() -> Optional[str]:
 
 # =================== 解析器 ===================
 
-def _parse_ld_list2(output: str, console_path: str) -> list[DeviceInfo]:
+def _parse_ld_list2(output: str, console_path: str, adb_running_ids: set = None) -> list[DeviceInfo]:
     """
     解析雷电 `ldconsole list2` 的输出。
     输出格式（每行逗号分隔）：
       索引,名称,顶层窗口句柄,绑定窗口句柄,是否进入,PID,VBox PID
+
+    adb_running_ids: 当前 adb devices 的设备 ID 集合，用于交叉验证端口
+    （雷电端口公式 5555+index*2 在改过端口/多开布局时可能不准）。
     """
     devices = []
+    if adb_running_ids is None:
+        adb_running_ids = set()
     for line in output.strip().splitlines():
         parts = line.strip().split(",")
         if len(parts) < 6:
@@ -122,7 +127,22 @@ def _parse_ld_list2(output: str, console_path: str) -> list[DeviceInfo]:
 
             # 雷电模拟器 ADB 端口规律：5555 + index * 2
             adb_port = 5555 + index * 2
-            device_id = f"127.0.0.1:{adb_port}" if running else ""
+            formula_id = f"127.0.0.1:{adb_port}"
+            device_id = ""
+            if running:
+                # 交叉验证：优先采用 adb devices 中实际存在的端口（兼容 emulator-XXXX 变体）
+                alt_id = f"emulator-{adb_port}"
+                if formula_id in adb_running_ids:
+                    device_id = formula_id
+                elif alt_id in adb_running_ids:
+                    device_id = alt_id
+                else:
+                    device_id = formula_id
+                    if adb_running_ids:
+                        logger.debug(
+                            "雷电实例 %s(index=%d) 报告运行，但 adb devices 未见端口 %d，device_id 可能不准确",
+                            name, index, adb_port,
+                        )
 
             devices.append(DeviceInfo(
                 device_type="ldplayer",
@@ -315,7 +335,7 @@ class EmulatorManager:
                     creationflags=_SUBPROCESS_FLAGS
                 )
                 if result.returncode == 0 and result.stdout.strip():
-                    ld_devices = _parse_ld_list2(result.stdout, ldconsole)
+                    ld_devices = _parse_ld_list2(result.stdout, ldconsole, adb_running_ids)
                     all_devices.extend(ld_devices)
                     known_emulator_ids.update(d.device_id for d in ld_devices if d.device_id)
                     logger.info("雷电模拟器: 发现 %d 个实例", len(ld_devices))
@@ -428,7 +448,8 @@ class EmulatorManager:
                     logger.info("设备 %s ADB 就绪", device.device_id)
                     return True
             except Exception:
-                pass
+                # 单次探测失败属正常（设备尚未就绪），记 debug 便于排查配置类错误
+                logger.debug("等待设备 %s ADB 就绪探测失败", device.device_id, exc_info=True)
             time.sleep(1)
 
         logger.warning("等待设备 %s ADB 超时 (%ds)", device.device_id, timeout)

@@ -371,6 +371,11 @@ class ScriptEngine:
                 self._log(f"⛔ 检测到脚本循环引用，已阻止: {chain}")
                 return
 
+            # 路径安全：拒绝越出 Scripts/ 根目录的脚本名（防目录遍历）
+            if not ScriptModel.is_safe_project_name(script_project):
+                self._log(f"⛔ 非法脚本项目名（疑似路径遍历），已拒绝: {script_project}")
+                return
+
             project_dir = os.path.join(ScriptModel.SCRIPTS_ROOT, script_project)
             if not os.path.isdir(project_dir):
                 self._log(f"❌ 脚本项目不存在: {project_dir}")

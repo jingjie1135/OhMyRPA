@@ -406,17 +406,40 @@ def scan_adb_paths():
     return found
 
 
-# 自动扫描结果缓存
-_scanned_adb = scan_adb_paths()
+# 自动扫描结果缓存（惰性：首次访问 config.ADB_PATH / config._scanned_adb 时才扫描，
+# 避免 import config 即触发注册表 + WMIC + 全盘 glob 的昂贵副作用）
+_scan_cache = None
 
-# 当前使用的 ADB 路径（默认取第一个扫描到的模拟器 ADB，找不到则留空触发 GUI 提示）
-ADB_PATH = next(iter(_scanned_adb.values()), "")
+
+def _ensure_scanned():
+    """惰性执行一次模拟器 ADB 扫描并缓存结果。"""
+    global _scan_cache
+    if _scan_cache is None:
+        _scan_cache = scan_adb_paths()
+    return _scan_cache
+
+
+def __getattr__(name):
+    # PEP 562：仅当模块没有真实属性 name 时才调用。
+    # set_adb_path 会创建真实的 ADB_PATH 全局，之后不再走到这里。
+    if name == "_scanned_adb":
+        return _ensure_scanned()
+    if name == "ADB_PATH":
+        return next(iter(_ensure_scanned().values()), "")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def set_adb_path(path):
-    """运行时切换 ADB 路径（GUI 调用）。"""
+    """运行时切换 ADB 路径（GUI 调用）。设置真实全局后，后续访问不再触发惰性扫描。"""
     global ADB_PATH
     ADB_PATH = path
+
+
+def refresh_adb_scan():
+    """强制重新扫描模拟器 ADB（GUI 刷新时调用），清除惰性缓存。"""
+    global _scan_cache
+    _scan_cache = None
+    return _ensure_scanned()
 
 
 # ===================== GUI 配置 =====================

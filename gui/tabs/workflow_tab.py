@@ -679,12 +679,14 @@ class WorkflowTab(QWidget):
             self._page_stack.removeWidget(gallery)
             gallery.deleteLater()
 
-            if result is None:
+            # 空结果 = 取消/未选择，保持原配置不变（与脚本/循环 Tab 行为一致，
+            # 避免用户点「返回」却把已配置的模板清空）
+            if not result:
                 return
 
             # 写回参数
             if mode == "single":
-                tpl_name = result[0].get("template", "") if result else ""
+                tpl_name = result[0].get("template", "")
                 node.params[param_key] = tpl_name
             else:
                 node.params[param_key] = result

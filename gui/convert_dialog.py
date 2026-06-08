@@ -40,7 +40,8 @@ def _qimage_to_cv(q_img: QImage):
     w, h = q_img.width(), q_img.height()
     ptr = q_img.bits()
     ptr.setsize(q_img.sizeInBytes())
-    arr = np.array(ptr).reshape(h, w, 3)
+    # .copy() 确保数组拥有独立缓冲，不悬挂引用 QImage 的内存
+    arr = np.array(ptr).reshape(h, w, 3).copy()
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
@@ -134,7 +135,7 @@ class ConvertDialog(QDialog):
         btn_layout.addStretch()
 
         self.btn_next = QPushButton("下一步 →")
-        self.btn_next.clicked.connect(self._go_step2)
+        self.btn_next.clicked.connect(self._on_next_clicked)
         btn_layout.addWidget(self.btn_next)
 
         self.btn_cancel = QPushButton("取消")
@@ -365,13 +366,18 @@ class ConvertDialog(QDialog):
 
     # =================== 页面导航 ===================
 
+    def _on_next_clicked(self):
+        """「下一步/完成」按钮统一分派：按当前页决定动作，避免反复 disconnect 重连。"""
+        if self.page_stack.currentIndex() == 0:
+            self._go_step2()
+        else:
+            self._on_finish()
+
     def _go_step1(self):
         """返回 Step 1"""
         self.page_stack.setCurrentIndex(0)
         self.btn_back.setEnabled(False)
         self.btn_next.setText("下一步 →")
-        self.btn_next.clicked.disconnect()
-        self.btn_next.clicked.connect(self._go_step2)
         self.step_label.setText("步骤 1/2: 区域筛选")
 
     def _go_step2(self):
@@ -425,8 +431,6 @@ class ConvertDialog(QDialog):
         self.page_stack.setCurrentIndex(1)
         self.btn_back.setEnabled(True)
         self.btn_next.setText("✨ 完成转换")
-        self.btn_next.clicked.disconnect()
-        self.btn_next.clicked.connect(self._on_finish)
         self.step_label.setText(f"步骤 2/2: 批量抠图（{len(self._filtered_steps)} 个步骤）")
 
     def _on_finish(self):

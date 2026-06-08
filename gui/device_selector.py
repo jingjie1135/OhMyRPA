@@ -7,7 +7,7 @@
 """
 
 import os
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QGroupBox, QCheckBox, QLineEdit,
@@ -16,6 +16,20 @@ from PyQt6.QtWidgets import (
 
 from gui.constants import COLOR_DANGER, COLOR_SUCCESS, create_font
 from emulator_manager import EmulatorManager, DeviceInfo
+
+
+class _DeviceScanWorker(QThread):
+    """后台扫描所有模拟器/真机设备，避免在 GUI 主线程同步阻塞。"""
+    done = pyqtSignal(object)  # list[DeviceInfo]
+
+    def run(self):
+        try:
+            devices = EmulatorManager.scan_all()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).debug("设备扫描失败", exc_info=True)
+            devices = []
+        self.done.emit(devices)
 
 
 class DeviceSelectorWidget(QWidget):
@@ -336,8 +350,30 @@ class DeviceSelectorWidget(QWidget):
     # =================== 设备池 ===================
 
     def _refresh_devices(self):
-        """后台刷新设备列表"""
-        self._available_devices = EmulatorManager.scan_all()
+        """后台刷新设备列表（扫描在 QThread 中执行，不阻塞 UI）。"""
+        if getattr(self, '_scan_worker', None) is not None and self._scan_worker.isRunning():
+            return  # 已有扫描进行中，忽略重复触发
+
+        # 占位提示
+        while self._devices_container.count():
+            item = self._devices_container.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        self._device_checkboxes.clear()
+        scanning = QLabel("正在扫描设备...")
+        scanning.setStyleSheet("color: #888; padding: 8px;")
+        self._devices_container.addWidget(scanning)
+
+        worker = _DeviceScanWorker(parent=self)
+        worker.done.connect(self._on_devices_scanned)
+        worker.finished.connect(worker.deleteLater)
+        self._scan_worker = worker
+        worker.start()
+
+    def _on_devices_scanned(self, devices):
+        """扫描完成回调（主线程）：更新设备池并重建 UI。"""
+        self._available_devices = devices or []
         self._rebuild_devices_ui()
 
     def _rebuild_devices_ui(self):

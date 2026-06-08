@@ -108,7 +108,7 @@ class AboutDialog(QDialog):
         layout.setContentsMargins(30, 25, 30, 25)
         layout.setSpacing(12)
         
-        title_label = QLabel("模拟器 · 自动化脚本")
+        title_label = QLabel("镜界自动化")
         title_label.setObjectName("titleLabel")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)

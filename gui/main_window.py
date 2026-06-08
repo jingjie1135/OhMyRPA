@@ -4,6 +4,7 @@
 
 import sys
 import subprocess
+import logging
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSlot, pyqtSignal
@@ -27,6 +28,8 @@ from gui.constants import (
 from gui.workers import ScreencapWorker
 from gui.widgets import ScreenshotWidget
 from gui.tabs import ImageLibraryTab, ScriptTab, LoopScriptTab, WorkflowTab
+
+logger = logging.getLogger(__name__)
 
 
 class AdbTask(QThread):
@@ -126,7 +129,7 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self):
         """构建主界面布局。"""
-        self.setWindowTitle("模拟器 · 自动化脚本 v0.1")
+        self.setWindowTitle("镜界自动化 v0.1")
         self.resize(1000, 900)
         self.setMinimumSize(1000, 800)
 
@@ -140,7 +143,7 @@ class MainWindow(QMainWindow):
 
         # 引入并添加顶栏
         from gui.top_bar import TopBar
-        self.header = TopBar("模拟器 · 自动化脚本")
+        self.header = TopBar("镜界自动化")
         main_layout.addWidget(self.header)
 
         # 内部主内容布局：还原原有的边距和间距
@@ -579,7 +582,9 @@ class MainWindow(QMainWindow):
         task = AdbTask(_do_restart, parent=self)
         task.finished.connect(lambda _: self._on_restart_done())
         task.error.connect(lambda e: self._on_restart_error(e))
-        self._adb_task = task  # 保持引用防止 GC
+        task.finished.connect(task.deleteLater)
+        task.error.connect(task.deleteLater)
+        self._adb_task = task  # 保持引用防止 GC（parent=self 已确保存活，完成后 deleteLater 释放）
         task.start()
 
     def _on_restart_done(self):
@@ -600,6 +605,8 @@ class MainWindow(QMainWindow):
         task = AdbTask(get_connected_devices, parent=self)
         task.finished.connect(self._on_devices_found)
         task.error.connect(self._on_devices_error)
+        task.finished.connect(task.deleteLater)
+        task.error.connect(task.deleteLater)
         self._adb_task = task
         task.start()
 
@@ -652,6 +659,8 @@ class MainWindow(QMainWindow):
         task = AdbTask(get_resolution, device_id, parent=self)
         task.finished.connect(self._on_resolution_found)
         task.error.connect(lambda e: self._append_log(f"分辨率检测失败: {e}"))
+        task.finished.connect(task.deleteLater)
+        task.error.connect(task.deleteLater)
         self._adb_task = task
         task.start()
 
@@ -1154,5 +1163,26 @@ class MainWindow(QMainWindow):
         if self._screencap_worker is not None and self._screencap_worker.isRunning():
             self._screencap_worker.requestInterruption()
             self._screencap_worker.wait(2000)
+
+        # 停止群控控制通道，释放 scrcpy 子进程 / socket，避免残留僵尸进程
+        if getattr(self, '_group_adapters', None):
+            for adapter in self._group_adapters.values():
+                client = getattr(adapter, 'client', None)
+                if client is not None:
+                    try:
+                        client.stop()
+                    except Exception:
+                        logger.debug("关闭群控通道失败", exc_info=True)
+            self._group_adapters.clear()
+
+        # 停止正在运行的流程批次线程
+        runner = getattr(self, '_workflow_runner', None)
+        if runner is not None and runner.isRunning():
+            try:
+                runner.stop()
+            except Exception:
+                logger.debug("停止流程线程失败", exc_info=True)
+            runner.wait(3000)
+
         self._sync_timer.stop()
         event.accept()

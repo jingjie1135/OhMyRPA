@@ -262,6 +262,7 @@ class ScrcpyClient:
         self._control_lock = threading.Lock()
         self._listen_socket: Optional[socket.socket] = None
         self._server_process = None
+        self._frame_thread = None  # 解码线程引用，stop() 时 join 释放
 
         # 控制器（start 后初始化）
         self.control: Optional[ControlSender] = None
@@ -313,6 +314,7 @@ class ScrcpyClient:
         if not self._control_only:
             if threaded:
                 t = threading.Thread(target=self._stream_loop, daemon=True)
+                self._frame_thread = t
                 t.start()
             else:
                 self._stream_loop()
@@ -328,6 +330,13 @@ class ScrcpyClient:
                     s.close()
                 except Exception:
                     pass
+
+        # 等待解码线程退出（socket 已关闭，_stream_loop 会很快 break）。
+        # 避免从解码线程自身调用 stop() 时 join 自己造成死锁。
+        frame_thread = self._frame_thread
+        if frame_thread is not None and frame_thread is not threading.current_thread():
+            frame_thread.join(timeout=2.0)
+        self._frame_thread = None
 
         # 终止 server 子进程
         proc = getattr(self, '_server_process', None)
