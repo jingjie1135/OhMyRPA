@@ -50,8 +50,9 @@ class DeviceAdapter(ABC):
         """直线滑动操作。"""
         ...
         
-    def swipe_path(self, path: list) -> None:
-        """根据完整的轨迹点回放多段滑动。path 格式: [(x, y, timestamp_ms), ...]"""
+    def swipe_path(self, path: list, duration_ms: int = 500) -> None:
+        """根据完整的轨迹点回放多段滑动。path 格式: [(x, y, timestamp_ms), ...]
+        duration_ms 仅在轨迹缺少时间戳信息、需回退为直线滑动时作为兜底时长。"""
         ...
 
     def touch_down(self, x: int, y: int, touch_id: int = -1) -> None:
@@ -119,20 +120,34 @@ class AdbAdapter(DeviceAdapter):
             frame = screencap_to_memory(self._device_id)
         return frame
 
+    def get_resolution(self) -> tuple[int, int]:
+        """获取设备屏幕分辨率 (宽, 高)；失败返回 (0, 0)。"""
+        from adb_utils import get_resolution as adb_get_resolution
+        return adb_get_resolution(self._device_id)
+
     def tap(self, x: int, y: int) -> None:
         from adb_utils import tap as adb_tap
         adb_tap(self._device_id, x, y)
+
+    # click 为 tap 的语义别名，供混合适配器统一调用
+    def click(self, x: int, y: int) -> None:
+        self.tap(x, y)
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
         from adb_utils import swipe
         swipe(self._device_id, x1, y1, x2, y2, duration_ms)
         
-    def swipe_path(self, path: list) -> None:
-        """ADB无法执行平滑的多点触摸，回退为取首尾点直线滑动"""
+    def swipe_path(self, path: list, duration_ms: int = 500) -> None:
+        """ADB无法执行平滑的多点触摸，回退为取首尾点直线滑动。
+        优先使用轨迹自带的时间跨度，缺失时退回 duration_ms。"""
         if len(path) >= 2:
             x1, y1 = path[0][:2]
             x2, y2 = path[-1][:2]
-            dur = max(100, path[-1][2] - path[0][2])
+            # 轨迹点形如 (x, y, timestamp_ms)；若无时间戳则用 duration_ms 兜底
+            if len(path[0]) >= 3 and len(path[-1]) >= 3:
+                dur = max(100, path[-1][2] - path[0][2])
+            else:
+                dur = duration_ms
             from adb_utils import swipe
             swipe(self._device_id, x1, y1, x2, y2, dur)
 
@@ -205,12 +220,17 @@ class ScrcpyAdapter(DeviceAdapter):
         else:
             logger.warning("ScrcpyAdapter: 连接未就绪，tap 操作被忽略")
 
+    # click 为 tap 的语义别名，供混合适配器统一调用
+    def click(self, x: int, y: int) -> None:
+        self.tap(x, y)
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
         if self._client and self._client.alive:
             self._client.control.swipe(x1, y1, x2, y2, duration_ms)
             
-    def swipe_path(self, path: list) -> None:
-        """使用 Scrcpy 控制通道执行零延迟的高精度轨迹重放"""
+    def swipe_path(self, path: list, duration_ms: int = 500) -> None:
+        """使用 Scrcpy 控制通道执行零延迟的高精度轨迹重放。
+        轨迹自带逐点时间戳，duration_ms 在此实现中不使用（仅为统一签名）。"""
         if not path or not self._client or not self._client.alive:
             return
         

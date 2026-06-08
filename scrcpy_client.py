@@ -288,10 +288,17 @@ class ScrcpyClient:
 
     def start(self, threaded: bool = True) -> None:
         """启动 scrcpy 客户端：推送 server → 建立连接 → 启动解码线程。"""
-        assert not self.alive, "客户端已在运行"
+        if self.alive:
+            raise RuntimeError("客户端已在运行")
 
-        self._deploy_server()
-        self._init_connection()
+        try:
+            self._deploy_server()
+            self._init_connection()
+        except Exception:
+            # 连接失败时主动清理已部署的设备端 server 进程与半开 socket，
+            # 避免反复重连在设备上堆积僵尸 server / 泄漏 socket。
+            self.stop()
+            raise
         self.alive = True
 
         # 创建控制器

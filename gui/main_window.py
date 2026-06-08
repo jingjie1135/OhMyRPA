@@ -50,6 +50,54 @@ class AdbTask(QThread):
             self.error.emit(str(e))
 
 
+class GroupConnectWorker(QThread):
+    """
+    后台为多台设备建立 scrcpy 无画面控制通道。
+
+    设备发现、并行连接与 join 全部在本线程内完成，避免阻塞 GUI 主线程；
+    进度日志与最终结果通过信号回主线程，杜绝从非 GUI 线程直接操作控件/共享状态。
+    """
+    log = pyqtSignal(str)          # 进度日志（回主线程追加）
+    done = pyqtSignal(dict)        # 完成：{device_id: ScrcpyAdapter}
+
+    def __init__(self, skip_device=None, parent=None):
+        super().__init__(parent)
+        self._skip_device = skip_device
+
+    def run(self):
+        import threading
+        from adb_utils import get_connected_devices
+        from scrcpy_client import ScrcpyClient
+        from device_adapter import ScrcpyAdapter
+
+        devices = get_connected_devices()
+        self.log.emit(f"🔄 正在为 {len(devices)} 台设备初始化控制通道...")
+
+        adapters = {}
+        lock = threading.Lock()
+
+        def _connect(d_id):
+            if d_id == self._skip_device:
+                return  # 该设备已有主同步通道，跳过
+            try:
+                client = ScrcpyClient(d_id, control_only=True)
+                client.start(threaded=False)
+                adapter = ScrcpyAdapter(d_id, client)
+                with lock:
+                    adapters[d_id] = adapter
+                self.log.emit(f"✅ {d_id} 无画面控制通道建立成功")
+            except Exception as e:
+                self.log.emit(f"❌ {d_id} 控制通道建立失败: {e}")
+
+        threads = [threading.Thread(target=_connect, args=(d,)) for d in devices]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.done.emit(adapters)
+
+
 class MainWindow(QMainWindow):
     """
     主窗口：集成截图预览、参数面板、控制按钮、日志区。
@@ -936,60 +984,47 @@ class MainWindow(QMainWindow):
         return adapters
 
     def _on_toggle_group_control(self, checked: bool):
-        from PyQt6.QtWidgets import QApplication
-        from adb_utils import get_connected_devices
-        
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            if checked:
-                devices = get_connected_devices()
-                current_sync = self.device_combo.currentText() if self.live_sync_btn.isChecked() else None
-                success_count = 0
-                
-                self._append_log(f"🔄 正在为 {len(devices)} 台设备初始化控制通道...")
-                
-                import threading
-                def _connect_worker(d_id):
-                    nonlocal success_count
-                    if d_id == current_sync:
-                        return # 已经有主通道了
+        if checked:
+            # 启动群控：设备发现与连接全部交给后台 QThread，避免阻塞 GUI。
+            current_sync = self.device_combo.currentText() if self.live_sync_btn.isChecked() else None
+            self.group_control_btn.setEnabled(False)
+            self.group_control_btn.setText("连接中…")
+
+            worker = GroupConnectWorker(skip_device=current_sync, parent=self)
+            worker.log.connect(self._append_log)
+            worker.done.connect(self._on_group_connect_done)
+            worker.finished.connect(worker.deleteLater)
+            self._group_connect_worker = worker
+            worker.start()
+        else:
+            self._append_log("🔴 正在关闭群控通道...")
+            for d_id, adapter in self._group_adapters.items():
+                if adapter and getattr(adapter, 'client', None):
                     try:
-                        from scrcpy_client import ScrcpyClient
-                        from device_adapter import ScrcpyAdapter
-                        client = ScrcpyClient(d_id, control_only=True)
-                        client.start(threaded=False)
-                        adapter = ScrcpyAdapter(d_id, client)
-                        self._group_adapters[d_id] = adapter
-                        success_count += 1
-                        self._append_log(f"✅ {d_id} 无画面控制通道建立成功")
-                    except Exception as e:
-                        self._append_log(f"❌ {d_id} 控制通道建立失败: {e}")
-                
-                threads = []
-                for d in devices:
-                    t = threading.Thread(target=_connect_worker, args=(d,))
-                    threads.append(t)
-                    t.start()
-                
-                for t in threads:
-                    t.join()
-                
-                self._append_log(f"🎉 群控已启动（通道数: {success_count}）")
-                self.group_control_btn.setText("⏹ 停控")
-            else:
-                self._append_log("🔴 正在关闭群控通道...")
-                for d_id, adapter in self._group_adapters.items():
-                    if adapter and getattr(adapter, 'client', None):
-                        try:
-                            adapter.client.stop()
-                        except: pass
-                self._group_adapters.clear()
-                self._append_log("✅ 群控已停止")
-                self.group_control_btn.setText("👥 群控")
-                
+                        adapter.client.stop()
+                    except Exception:
+                        pass
+            self._group_adapters.clear()
+            self._append_log("✅ 群控已停止")
+            self.group_control_btn.setText("👥 群控")
             self._update_ui_scrcpy_count()
-        finally:
-            QApplication.restoreOverrideCursor()
+
+    @pyqtSlot(dict)
+    def _on_group_connect_done(self, adapters: dict):
+        """群控后台连接完成回调（主线程）：更新共享状态与 UI。"""
+        self.group_control_btn.setEnabled(True)
+        self._group_adapters.update(adapters)
+        if self._group_adapters:
+            self._append_log(f"🎉 群控已启动（通道数: {len(self._group_adapters)}）")
+            self.group_control_btn.setText("⏹ 停控")
+        else:
+            self._append_log("⚠️ 未建立任何控制通道，群控未启动")
+            # 没有任何通道时把按钮复位为未选中，避免「已开启」的错觉
+            self.group_control_btn.blockSignals(True)
+            self.group_control_btn.setChecked(False)
+            self.group_control_btn.blockSignals(False)
+            self.group_control_btn.setText("👥 群控")
+        self._update_ui_scrcpy_count()
 
     def _update_ui_scrcpy_count(self):
         """更新 UI 上的 Scrcpy 连接数"""

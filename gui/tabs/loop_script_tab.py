@@ -163,6 +163,8 @@ class LoopScriptTab(QWidget):
         self.toolbox_tree.itemDoubleClicked.connect(self._on_toolbox_double_clicked)
         self.action_list.currentRowChanged.connect(self._on_action_selected)
         self.action_list.model().rowsMoved.connect(self._on_actions_reordered)
+        # 勾选信号只连一次（放在 _reload_action_list_ui 内会随每次加载重复累积连接）
+        self.action_list.itemChanged.connect(self._on_item_check_changed)
         
         # 初始化项目列表
         self._refresh_projects()
@@ -323,10 +325,7 @@ class LoopScriptTab(QWidget):
             self.action_list.addItem(list_item)
         
         self.action_list.blockSignals(False)
-        
-        # 连接勾选信号
-        self.action_list.itemChanged.connect(self._on_item_check_changed)
-        
+
         self._refresh_action_list_text()
         
         # 默认显示循环配置

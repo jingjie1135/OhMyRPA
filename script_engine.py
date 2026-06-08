@@ -12,16 +12,19 @@ class ScriptEngine:
     通用脚本执行引擎，负责解析 ActionNode 流水线并调用底层接口。
     包揽阻塞状态控制、异常处理及弹窗守卫逻辑 (PopupGuard)。
     """
-    def __init__(self, model: ScriptModel, device_id: str, pause_event=None, interrupt_check=None, callbacks=None, adapter: DeviceAdapter = None):
+    def __init__(self, model: ScriptModel, device_id: str, pause_event=None, interrupt_check=None, callbacks=None, adapter: DeviceAdapter = None, call_stack: set = None):
         self.model = model
         self.device_id = device_id
         self.pause_event = pause_event
         self.interrupt_check = interrupt_check
         self.callbacks = callbacks or {}
-        
+
         # DeviceAdapter（DRY：统一设备交互入口）
         self._adapter = adapter or HybridDeviceAdapter(device_id)
-        
+
+        # 嵌套 run_script 的调用链，用于检测循环引用（A→B→A）防止无限递归
+        self._call_stack = set(call_stack) if call_stack else set()
+
         self.consecutive_fails = 0
         
     def _log(self, msg):
@@ -257,7 +260,7 @@ class ScriptEngine:
             
             while time.time() - start_time < timeout:
                 self._check_interrupt_and_pause()
-                img = screencap_to_memory(self.device_id)
+                img = self._adapter.get_frame()
                 if img is None:
                     time.sleep(0.5)
                     continue
@@ -361,6 +364,13 @@ class ScriptEngine:
                 return
 
             self._log(f"📜 开始执行脚本: [{script_project}]")
+
+            # 循环引用防护：若该脚本已在当前调用链中，拒绝再次进入，避免无限递归
+            if script_project in self._call_stack:
+                chain = " → ".join(list(self._call_stack) + [script_project])
+                self._log(f"⛔ 检测到脚本循环引用，已阻止: {chain}")
+                return
+
             project_dir = os.path.join(ScriptModel.SCRIPTS_ROOT, script_project)
             if not os.path.isdir(project_dir):
                 self._log(f"❌ 脚本项目不存在: {project_dir}")
@@ -377,6 +387,7 @@ class ScriptEngine:
                 return
 
             # 创建子引擎，复用当前的设备适配器、暂停/中断控制和回调
+            # 调用链追加当前脚本名，供更深层的 run_script 检测循环引用
             sub_engine = ScriptEngine(
                 model=sub_model,
                 device_id=self.device_id,
@@ -384,12 +395,16 @@ class ScriptEngine:
                 interrupt_check=self.interrupt_check,
                 callbacks=self.callbacks,
                 adapter=self._adapter,
+                call_stack=self._call_stack | {script_project},
             )
 
-            # 判断是否为循环脚本（config 中有循环配置）
+            # 判断是否为循环脚本。
+            # 注意：scan_interval 默认非零（1.0），不能用它判断循环模式，
+            # 否则任何被引用的子脚本都会进入无限循环、永不返回父流程。
+            # 仅当显式配置了有限的 max_loops（>0）时才以循环模式执行有限轮数。
             cfg = sub_model.config
-            if getattr(cfg, 'max_loops', 0) > 0 or getattr(cfg, 'scan_interval', 0) > 0:
-                self._log(f"🔄 脚本 [{script_project}] 以循环模式执行")
+            if getattr(cfg, 'max_loops', 0) > 0:
+                self._log(f"🔄 脚本 [{script_project}] 以循环模式执行（{cfg.max_loops} 轮）")
                 sub_engine.run_loop()
             else:
                 # 线性执行所有步骤
@@ -420,11 +435,20 @@ class ScriptEngine:
         """
         循环执行模式：按顺序执行所有步骤，执行完毕后等待间隔，进入下一轮。
         每轮按 actions 列表顺序逐个执行，multi_match 等指令通过 _execute_action 统一调度。
+
+        Args:
+            enabled_templates: 启用的模板文件名(basename)列表。为 None 表示不过滤、
+                执行全部动作；否则仅执行模板名在集合内的 find_and_tap 动作，
+                其余类型动作（sleep/swipe/multi_match 等）不受影响、照常执行。
         """
         cfg = self.model.config
+        # 规整为集合便于快速判定；None 表示「不过滤」
+        enabled_set = set(enabled_templates) if enabled_templates is not None else None
         self._log(f"🔄 循环模式启动: {self.model.name}")
         self._log(f"   间隔={cfg.scan_interval}s, 最大循环={cfg.max_loops or '无限'}")
         self._log(f"   共 {len(self.model.actions)} 个步骤")
+        if enabled_set is not None:
+            self._log(f"   启用模板过滤: {len(enabled_set)} 个 find_and_tap 模板已启用")
         
         if not self._pre_flight_checks():
             return
@@ -450,6 +474,11 @@ class ScriptEngine:
                 # 按顺序执行所有步骤
                 for action in self.model.actions:
                     self._check_interrupt_and_pause()
+                    # 启用模板过滤：被用户取消勾选的 find_and_tap 动作跳过执行
+                    if enabled_set is not None and action.type == "find_and_tap":
+                        tpl = os.path.basename(action.params.get("template", ""))
+                        if tpl and tpl not in enabled_set:
+                            continue
                     self._execute_action(action)
                 
                 # 等待扫描间隔

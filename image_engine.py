@@ -79,20 +79,6 @@ def load_templates(directory):
     return templates
 
 
-def clear_cache(directory=None):
-    """
-    清除模板缓存。当用户更新了图库文件后，可调用此函数强制重新加载。
-
-    Args:
-        directory (str, optional): 指定清除某目录的缓存；为 None 则清除全部
-    """
-    if directory:
-        _template_cache.pop(directory, None)
-    else:
-        _template_cache.clear()
-    logger.info("模板缓存已清除: %s", directory or "全部")
-
-
 def _nms_boxes(boxes, iou_threshold):
     """
     非极大值抑制 (NMS)：去除高度重叠的检测框，保留置信度最高的结果。
@@ -224,6 +210,7 @@ def match_all(screen, templates, threshold=None):
                         # 找到了！我们要把匹配框修正回未缩放的原本尺寸（为了外层统一拿 tmpl_w, tmpl_h 读取中心点）
                         # cv2.matchTemplate 返回的是左上角坐标，这里把匹配到的左上角传出去
                         locations = locs
+                        result = res  # 关键：score 必须从缩放后的结果矩阵读取，否则越界或读错分数
                         tmpl_w, tmpl_h = new_w, new_h  # 更新为实际找到的特征尺寸
                         break
 
