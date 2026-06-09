@@ -351,8 +351,13 @@ class DeviceSelectorWidget(QWidget):
 
     def _refresh_devices(self):
         """后台刷新设备列表（扫描在 QThread 中执行，不阻塞 UI）。"""
-        if getattr(self, '_scan_worker', None) is not None and self._scan_worker.isRunning():
-            return  # 已有扫描进行中，忽略重复触发
+        worker = getattr(self, '_scan_worker', None)
+        if worker is not None:
+            try:
+                if worker.isRunning():
+                    return  # 已有扫描进行中，忽略重复触发
+            except RuntimeError:
+                self._scan_worker = None
 
         # 占位提示
         while self._devices_container.count():
@@ -367,6 +372,7 @@ class DeviceSelectorWidget(QWidget):
 
         worker = _DeviceScanWorker(parent=self)
         worker.done.connect(self._on_devices_scanned)
+        worker.finished.connect(lambda: setattr(self, '_scan_worker', None))
         worker.finished.connect(worker.deleteLater)
         self._scan_worker = worker
         worker.start()
