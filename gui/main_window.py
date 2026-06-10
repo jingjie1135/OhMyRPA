@@ -727,6 +727,10 @@ class MainWindow(QMainWindow):
             enabled_templates = None
         else:
             script_model = self.script_tab.current_model
+            if not script_model.actions:
+                self._append_log("脚本为空，请先录制或添加步骤")
+                self.start_btn.setChecked(False)
+                return
             enabled_templates = None
 
         # 预检查：脚本分辨率与模拟器分辨率是否一致
@@ -829,39 +833,55 @@ class MainWindow(QMainWindow):
             self._append_log("所有设备已暂停")
 
     def _do_stop(self):
-        """停止工作线程。"""
+        """停止工作线程（非阻塞）。
+
+        只发停止信号后立即返回，绝不在主线程 wait()；
+        UI 恢复完全交给 _on_worker_finished 信号回调（最后一个线程结束时执行）。
+        """
+        stopping = False
+
         # 停止 WorkflowRunner（如果有）
-        if self._workflow_runner and self._workflow_runner.isRunning():
+        if self._workflow_runner is not None and self._workflow_runner.isRunning():
             self._append_log("正在停止流程执行...")
             self._workflow_runner.stop()
-            self._workflow_runner.wait(10000)
+            self._workflow_runner.requestInterruption()
+            stopping = True
+
+        if self._workers:
+            self._append_log("正在停止所有运行中的设备...")
+            for w in self._workers:
+                w.stop()
+                w.requestInterruption()
+            stopping = True
+
+        if not stopping:
             return
 
-        if not self._workers:
-            return
-
-        self._append_log("正在停止所有运行中的设备...")
-        for w in self._workers:
-            w.stop()
-        
-        for w in self._workers:
-            w.wait(5000)
-            
-        # _on_worker_finished 会在单个完毕时被接连调用，这里只需触发即可
+        # 置为"停止中"禁用态，防止用户重复点击；
+        # 最终的 UI 恢复由 _on_worker_finished 完成。
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText("⏹ 停止中...")
+        self.pause_btn.setEnabled(False)
 
     def _on_worker_finished(self):
-        """工作线程结束后的清理。"""
+        """工作线程结束后的清理（信号驱动 UI 恢复的唯一入口）。"""
         sender_worker = self.sender()
+        if sender_worker is None:
+            # 非信号触发或发送者已销毁，不做任何 UI 恢复
+            return
 
-        # WorkflowRunner 完成
         if sender_worker is self._workflow_runner:
+            # WorkflowRunner 完成：继续执行下方的 UI 恢复逻辑
             self._workflow_runner = None
-            # 继续执行下方的 UI 恢复逻辑
         elif sender_worker in self._workers:
             self._workers.remove(sender_worker)
             # 只有当所有 worker 全部跑完后，才恢复 UI
             if len(self._workers) > 0:
                 return
+        else:
+            # 未知发送者（如已被移除的旧线程残留信号），忽略
+            logger.warning("收到未知工作线程的 finished 信号，已忽略: %r", sender_worker)
+            return
 
         self._sync_timer.stop()
         self._runtime_config = None
@@ -870,6 +890,7 @@ class MainWindow(QMainWindow):
         self.start_btn.blockSignals(True)
         self.start_btn.setChecked(False)
         self.start_btn.blockSignals(False)
+        self.start_btn.setEnabled(True)
         self.start_btn.setText("▶ 启动")
         self.start_btn.setObjectName("successBtn")
         self.start_btn.style().unpolish(self.start_btn)
@@ -887,6 +908,17 @@ class MainWindow(QMainWindow):
         device_id = self.device_combo.currentText()
         if not device_id:
             return None
+
+        # 上次的 worker 没停干净：先尝试短暂等待，仍在跑则拒绝复用
+        if self._screencap_worker is not None and self._screencap_worker.isRunning():
+            self._screencap_worker.requestInterruption()
+            self._screencap_worker.wait(500)
+            if self._screencap_worker.isRunning():
+                logger.warning("旧截图线程仍在运行，拒绝复用/重建 ScreencapWorker")
+                self._append_log("截图线程仍在停止中，请稍后重试")
+                return None
+            # 已停止的旧线程不再复用，丢弃后重建（parent=self，由 Qt 负责析构）
+            self._screencap_worker = None
 
         if self._screencap_worker is None:
             self._screencap_worker = ScreencapWorker(parent=self)
@@ -932,9 +964,13 @@ class MainWindow(QMainWindow):
             self._append_log("请先选择一个设备")
             return
 
-        worker = self._ensure_screencap_worker()
-
         if checked:
+            worker = self._ensure_screencap_worker()
+            if worker is None:
+                # worker 创建失败（如旧线程未停干净），复位按钮避免假"已开启"状态
+                self.live_sync_btn.setChecked(False)
+                return
+
             worker.setup(device_id, continuous=True)
             if not worker.isRunning():
                 worker.start()
@@ -947,6 +983,8 @@ class MainWindow(QMainWindow):
             if self._screencap_worker is not None:
                 self._screencap_worker.requestInterruption()
                 self._screencap_worker.wait(2000)
+                # 置空让下次 _ensure_screencap_worker 重建并重新连接信号
+                self._screencap_worker = None
 
             self.live_sync_btn.setText("▶\n同步")
             self.screenshot_btn.setEnabled(True)
@@ -1147,22 +1185,51 @@ class MainWindow(QMainWindow):
     # ==================== 窗口关闭 ====================
 
     def closeEvent(self, event):
-        """窗口关闭时安全停止所有工作线程。"""
+        """窗口关闭时安全停止所有工作线程。
+
+        策略：先对所有线程发停止信号，再以统一 1500ms 上限逐个 wait；
+        超时的线程记 warning 后继续关窗（QThread 的 parent 都是本窗口，析构交给 Qt）。
+        不使用 terminate()。
+        """
+        WAIT_MS = 1500
+
         if self.live_sync_btn.isChecked():
             self.live_sync_btn.setChecked(False)
-            self._on_toggle_live_sync(False)
-        
-        # Stop all bot workers
-        if hasattr(self, '_workers') and self._workers: # Check if _workers exists and is not empty
-            for worker in self._workers:
-                if worker.isRunning():
-                    worker.stop()
-                    worker.wait(3000) # Wait for worker to finish
-            self._workers.clear() # Clear the list after stopping all
+            self.screenshot_widget._live_control_mode = False
+            self.screenshot_widget._scrcpy_adapter = None
 
-        if self._screencap_worker is not None and self._screencap_worker.isRunning():
-            self._screencap_worker.requestInterruption()
-            self._screencap_worker.wait(2000)
+        # ---- 第一阶段：对所有线程发停止信号（不等待） ----
+        workers = list(self._workers) if getattr(self, '_workers', None) else []
+        for worker in workers:
+            if worker.isRunning():
+                worker.stop()
+                worker.requestInterruption()
+
+        screencap = self._screencap_worker
+        if screencap is not None and screencap.isRunning():
+            screencap.requestInterruption()
+
+        runner = getattr(self, '_workflow_runner', None)
+        if runner is not None and runner.isRunning():
+            try:
+                runner.stop()
+            except Exception:
+                logger.debug("停止流程线程失败", exc_info=True)
+            runner.requestInterruption()
+
+        # ---- 第二阶段：统一短超时等待，超时记 warning 后放行 ----
+        for worker in workers:
+            if worker.isRunning() and not worker.wait(WAIT_MS):
+                logger.warning("BotWorker(%s) 未在 %dms 内退出，关窗时放弃等待",
+                               getattr(worker, 'device_id', '?'), WAIT_MS)
+        self._workers.clear()
+
+        if screencap is not None and screencap.isRunning() and not screencap.wait(WAIT_MS):
+            logger.warning("ScreencapWorker 未在 %dms 内退出，关窗时放弃等待", WAIT_MS)
+        self._screencap_worker = None
+
+        if runner is not None and runner.isRunning() and not runner.wait(WAIT_MS):
+            logger.warning("WorkflowRunner 未在 %dms 内退出，关窗时放弃等待", WAIT_MS)
 
         # 停止群控控制通道，释放 scrcpy 子进程 / socket，避免残留僵尸进程
         if getattr(self, '_group_adapters', None):
@@ -1174,15 +1241,6 @@ class MainWindow(QMainWindow):
                     except Exception:
                         logger.debug("关闭群控通道失败", exc_info=True)
             self._group_adapters.clear()
-
-        # 停止正在运行的流程批次线程
-        runner = getattr(self, '_workflow_runner', None)
-        if runner is not None and runner.isRunning():
-            try:
-                runner.stop()
-            except Exception:
-                logger.debug("停止流程线程失败", exc_info=True)
-            runner.wait(3000)
 
         self._sync_timer.stop()
         event.accept()
