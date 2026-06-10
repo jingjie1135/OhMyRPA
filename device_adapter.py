@@ -10,6 +10,7 @@
 """
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -234,23 +235,28 @@ class ScrcpyAdapter(DeviceAdapter):
             
     def swipe_path(self, path: list, duration_ms: int = 500) -> None:
         """使用 Scrcpy 控制通道执行零延迟的高精度轨迹重放。
-        轨迹自带逐点时间戳，duration_ms 在此实现中不使用（仅为统一签名）。"""
+        轨迹点优先使用自带时间戳；缺少时间戳时按 duration_ms 均摊间隔。"""
         if not path or not self._client or not self._client.alive:
             return
         
-        import time
-        x0, y0, t0 = path[0]
+        n = len(path)
+        step = duration_ms / max(1, n - 1)  # 无时间戳时按 duration_ms 均摊
+        p0 = path[0]
+        x0, y0 = p0[0], p0[1]
+        t0 = p0[2] if len(p0) >= 3 else 0
         self._client.control.touch_down(x0, y0)
-        
+
         last_t = t0
-        for i in range(1, len(path)):
-            x, y, t = path[i]
+        for i in range(1, n):
+            p = path[i]
+            x, y = p[0], p[1]
+            t = p[2] if len(p) >= 3 else last_t + step
             delay = (t - last_t) / 1000.0
             if delay > 0:
                 time.sleep(delay)
             self._client.control.touch_move(x, y)
             last_t = t
-            
+
         self._client.control.touch_up(path[-1][0], path[-1][1])
 
     def touch_down(self, x: int, y: int, touch_id: int = -1) -> None:

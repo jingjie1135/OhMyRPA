@@ -10,6 +10,7 @@ import sys
 import re
 import json
 import subprocess
+import threading
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -20,6 +21,18 @@ logger = logging.getLogger(__name__)
 
 # Windows 下隐藏子进程控制台窗口
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
+
+def _decode_output(b) -> str:
+    """解码子进程输出：优先 UTF-8，失败回退 GBK（中文 Windows 下实例名/路径含中文）。"""
+    if b is None:
+        return ""
+    if isinstance(b, str):
+        return b
+    try:
+        return b.decode('utf-8')
+    except UnicodeDecodeError:
+        return b.decode('gbk', errors='replace')
 
 
 # =================== 数据模型 ===================
@@ -241,10 +254,10 @@ def _get_adb_device_ids() -> set:
     try:
         result = subprocess.run(
             [config.ADB_PATH, "devices"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, timeout=10,
             creationflags=_SUBPROCESS_FLAGS
         )
-        for line in result.stdout.strip().splitlines()[1:]:
+        for line in _decode_output(result.stdout).strip().splitlines()[1:]:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[1] == "device":
                 ids.add(parts[0])
@@ -265,10 +278,10 @@ def _scan_phone_devices(known_emulator_ids: set) -> list[DeviceInfo]:
     try:
         result = subprocess.run(
             [config.ADB_PATH, "devices", "-l"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, timeout=10,
             creationflags=_SUBPROCESS_FLAGS
         )
-        for line in result.stdout.strip().splitlines()[1:]:
+        for line in _decode_output(result.stdout).strip().splitlines()[1:]:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[1] == "device":
                 device_id = parts[0]
@@ -312,13 +325,21 @@ class EmulatorManager:
 
     # 扫描结果缓存
     _cache: list[DeviceInfo] = []
+    # 缓存与扫描互斥锁（防止并发 scan_all 重复扫描 / 写缓存竞争）
+    _cache_lock: threading.Lock = threading.Lock()
 
     @staticmethod
     def scan_all() -> list[DeviceInfo]:
         """
         扫描所有设备（雷电模拟器 + MuMu模拟器 + 手机设备）。
         返回 DeviceInfo 列表，结果同时缓存。
+        整个扫描过程持有 _cache_lock，并发调用会串行化（去重并发扫描）。
         """
+        with EmulatorManager._cache_lock:
+            return EmulatorManager._scan_all_locked()
+
+    @staticmethod
+    def _scan_all_locked() -> list[DeviceInfo]:
         all_devices = []
         known_emulator_ids = set()
 
@@ -331,11 +352,12 @@ class EmulatorManager:
             try:
                 result = subprocess.run(
                     [ldconsole, "list2"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, timeout=10,
                     creationflags=_SUBPROCESS_FLAGS
                 )
-                if result.returncode == 0 and result.stdout.strip():
-                    ld_devices = _parse_ld_list2(result.stdout, ldconsole, adb_running_ids)
+                ld_stdout = _decode_output(result.stdout)
+                if result.returncode == 0 and ld_stdout.strip():
+                    ld_devices = _parse_ld_list2(ld_stdout, ldconsole, adb_running_ids)
                     all_devices.extend(ld_devices)
                     known_emulator_ids.update(d.device_id for d in ld_devices if d.device_id)
                     logger.info("雷电模拟器: 发现 %d 个实例", len(ld_devices))
@@ -350,12 +372,13 @@ class EmulatorManager:
             try:
                 result = subprocess.run(
                     [mumu_mgr, "info", "-v", "all"],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, timeout=10,
                     creationflags=_SUBPROCESS_FLAGS
                 )
-                if result.returncode == 0 and result.stdout.strip():
+                mumu_stdout = _decode_output(result.stdout)
+                if result.returncode == 0 and mumu_stdout.strip():
                     mumu_devices = _parse_mumu_info(
-                        result.stdout, mumu_mgr,
+                        mumu_stdout, mumu_mgr,
                         adb_running_ids=adb_running_ids
                     )
                     all_devices.extend(mumu_devices)
@@ -395,8 +418,13 @@ class EmulatorManager:
             else:
                 return False
 
-            subprocess.run(cmd, capture_output=True, timeout=30,
-                           creationflags=_SUBPROCESS_FLAGS)
+            r = subprocess.run(cmd, capture_output=True, timeout=30,
+                               creationflags=_SUBPROCESS_FLAGS)
+            if r.returncode != 0:
+                logger.warning("启动 %s (索引 %d) 失败 (rc=%d): %s",
+                               device.name, device.index, r.returncode,
+                               _decode_output(r.stderr).strip())
+                return False
             logger.info("已启动 %s (索引 %d)", device.name, device.index)
             return True
         except Exception as e:
@@ -421,8 +449,13 @@ class EmulatorManager:
             else:
                 return False
 
-            subprocess.run(cmd, capture_output=True, timeout=15,
-                           creationflags=_SUBPROCESS_FLAGS)
+            r = subprocess.run(cmd, capture_output=True, timeout=15,
+                               creationflags=_SUBPROCESS_FLAGS)
+            if r.returncode != 0:
+                logger.warning("关闭 %s (索引 %d) 失败 (rc=%d): %s",
+                               device.name, device.index, r.returncode,
+                               _decode_output(r.stderr).strip())
+                return False
             logger.info("已关闭 %s (索引 %d)", device.name, device.index)
             return True
         except Exception as e:
@@ -441,10 +474,10 @@ class EmulatorManager:
             try:
                 result = subprocess.run(
                     [config.ADB_PATH, "-s", device.device_id, "shell", "echo", "ok"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, timeout=5,
                     creationflags=_SUBPROCESS_FLAGS
                 )
-                if result.returncode == 0 and "ok" in result.stdout:
+                if result.returncode == 0 and "ok" in _decode_output(result.stdout):
                     logger.info("设备 %s ADB 就绪", device.device_id)
                     return True
             except Exception:

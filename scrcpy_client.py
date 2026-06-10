@@ -77,9 +77,12 @@ class ControlSender:
             return
         try:
             with self._lock:
-                self._socket.send(data)
-        except OSError:
-            logger.warning("控制通道发送失败（连接可能已断开）")
+                self._socket.sendall(data)
+        except OSError as e:
+            if isinstance(e, (BrokenPipeError, ConnectionResetError)):
+                logger.error("控制通道发送失败（连接已断开）: %s", e)
+            else:
+                logger.warning("控制通道发送失败（连接可能已断开）")
 
     def _update_resolution(self, resolution: Tuple[int, int]) -> None:
         """更新设备分辨率（帧大小变化时调用）。"""
@@ -176,15 +179,17 @@ class ControlSender:
         interval = duration_ms / 1000.0 / steps
 
         self.touch_down(x1, y1)
-        for i in range(1, steps + 1):
-            # ease-in-out 缓动：t 从 0 到 1
-            t = i / steps
-            ease_t = t * t * (3 - 2 * t)  # smoothstep
-            cx = int(x1 + (x2 - x1) * ease_t)
-            cy = int(y1 + (y2 - y1) * ease_t)
-            self.touch_move(cx, cy)
-            time.sleep(interval)
-        self.touch_up(x2, y2)
+        try:
+            for i in range(1, steps + 1):
+                # ease-in-out 缓动：t 从 0 到 1
+                t = i / steps
+                ease_t = t * t * (3 - 2 * t)  # smoothstep
+                cx = int(x1 + (x2 - x1) * ease_t)
+                cy = int(y1 + (y2 - y1) * ease_t)
+                self.touch_move(cx, cy)
+                time.sleep(interval)
+        finally:
+            self.touch_up(x2, y2)
 
     def swipe_path(self, points: list, duration_ms: int = 500) -> None:
         """
@@ -196,25 +201,26 @@ class ControlSender:
 
         self.touch_down(points[0][0], points[0][1])
 
-        # 如果有时间戳则按实际时间间隔回放
-        if len(points[0]) >= 3:
-            t0 = points[0][2]
-            for i in range(1, len(points)):
-                x, y = points[i][0], points[i][1]
-                dt = (points[i][2] - points[i - 1][2]) / 1000.0
-                if dt > 0:
-                    time.sleep(min(dt, 0.1))  # 单步最长 100ms 防卡
-                self.touch_move(x, y)
-        else:
-            # 无时间戳，均匀分配
-            interval = duration_ms / 1000.0 / (len(points) - 1)
-            for i in range(1, len(points)):
-                x, y = points[i][0], points[i][1]
-                self.touch_move(x, y)
-                time.sleep(interval)
-
-        last = points[-1]
-        self.touch_up(last[0], last[1])
+        try:
+            # 如果有时间戳则按实际时间间隔回放
+            if len(points[0]) >= 3:
+                t0 = points[0][2]
+                for i in range(1, len(points)):
+                    x, y = points[i][0], points[i][1]
+                    dt = (points[i][2] - points[i - 1][2]) / 1000.0
+                    if dt > 0:
+                        time.sleep(min(dt, 0.1))  # 单步最长 100ms 防卡
+                    self.touch_move(x, y)
+            else:
+                # 无时间戳，均匀分配
+                interval = duration_ms / 1000.0 / (len(points) - 1)
+                for i in range(1, len(points)):
+                    x, y = points[i][0], points[i][1]
+                    self.touch_move(x, y)
+                    time.sleep(interval)
+        finally:
+            last = points[-1]
+            self.touch_up(last[0], last[1])
 
 
 # ==================== ScrcpyClient ====================
@@ -504,6 +510,7 @@ class ScrcpyClient:
             if not self._control_only:
                 # 第一个连接：video socket
                 self._video_socket, _ = self._listen_socket.accept()
+                self._video_socket.settimeout(15.0)
                 logger.info("[%s] video socket 已连接", self._device_id)
 
             # 最后一个连接：control socket
@@ -531,8 +538,8 @@ class ScrcpyClient:
             height = struct.unpack(">I", device_meta[72:76])[0]
             self.resolution = (width, height)
 
-            # 设置非阻塞模式
-            self._video_socket.setblocking(False)
+            # 恢复为无超时（后续 _stream_loop 自行管理超时）
+            self._video_socket.settimeout(None)
         else:
             self.device_name = self._device_id
             from adb_utils import get_resolution
@@ -588,11 +595,17 @@ class ScrcpyClient:
         last_frame_time = time.monotonic()
         config_data = b""  # 缓存 config packet
 
+        # 阻塞模式 + 1 秒超时（循环外设置一次即可）
+        try:
+            self._video_socket.setblocking(True)
+            self._video_socket.settimeout(1.0)
+        except (OSError, AttributeError):
+            logger.info("[%s] 视频 socket 不可用，解码循环退出", self._device_id)
+            return
+
         while self.alive:
             try:
                 # 读取 12 字节帧头（阻塞模式读帧头）
-                self._video_socket.setblocking(True)
-                self._video_socket.settimeout(1.0)
                 try:
                     header = self._recv_exact(self._video_socket, HEADER_SIZE)
                 except (socket.timeout, ConnectionError):

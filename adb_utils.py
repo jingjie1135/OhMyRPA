@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
 
+def _decode_output(b) -> str:
+    """解码子进程输出：优先 UTF-8，失败回退 GBK（中文 Windows 下 ADB/控制台输出）。"""
+    if b is None:
+        return ""
+    if isinstance(b, str):
+        return b
+    try:
+        return b.decode('utf-8')
+    except UnicodeDecodeError:
+        return b.decode('gbk', errors='replace')
+
+
 def get_connected_devices():
     """
     通过 `adb devices` 获取当前所有已连接的模拟器设备 ID 列表。
@@ -32,12 +44,11 @@ def get_connected_devices():
         result = subprocess.run(
             [config.ADB_PATH, "devices"],
             capture_output=True,
-            text=True,
             timeout=10,
             creationflags=_SUBPROCESS_FLAGS
         )
         devices = []
-        for line in result.stdout.strip().splitlines()[1:]:  # 跳过首行标题
+        for line in _decode_output(result.stdout).strip().splitlines()[1:]:  # 跳过首行标题
             parts = line.strip().split("\t")
             if len(parts) == 2 and parts[1] == "device":
                 devices.append(parts[0])
@@ -64,12 +75,11 @@ def get_resolution(device_id):
         result = subprocess.run(
             [config.ADB_PATH, "-s", device_id, "shell", "wm", "size"],
             capture_output=True,
-            text=True,
             timeout=10,
             creationflags=_SUBPROCESS_FLAGS
         )
         # 输出格式示例: "Physical size: 1280x720"
-        output = result.stdout.strip()
+        output = _decode_output(result.stdout).strip()
         if "Override size:" in output:
             # 优先使用 Override（用户设置的）分辨率
             size_line = [l for l in output.splitlines() if "Override" in l][-1]
@@ -148,8 +158,8 @@ def screencap_fast(device_id):
     import tempfile
     import os
 
-    # 设备端临时文件路径
-    remote_path = "/sdcard/_adb_screencap.png"
+    # 设备端临时文件路径（按 device_id 派生，避免多设备并发冲突）
+    remote_path = f"/sdcard/_adb_sc_{device_id.replace(':', '_').replace('.', '_')}.png"
     # 本地临时文件（用设备ID区分多开）
     local_path = os.path.join(
         tempfile.gettempdir(), f"_screencap_{device_id.replace(':', '_')}.png"
@@ -236,7 +246,7 @@ def swipe(device_id: str, x1: int, y1: int, x2: int, y2: int,
             creationflags=_SUBPROCESS_FLAGS
         )
     except subprocess.CalledProcessError as e:
-        logger.error(f"[{device_id}] ADB 滑动失败: {e.stderr}")
+        logger.error(f"[{device_id}] ADB 滑动失败: {_decode_output(e.stderr)}")
     except subprocess.TimeoutExpired:
         logger.error(f"[{device_id}] ADB 滑动超时")
 
@@ -256,6 +266,6 @@ def keyevent(device_id: str, keycode: int) -> None:
             creationflags=_SUBPROCESS_FLAGS
         )
     except subprocess.CalledProcessError as e:
-        logger.error(f"[{device_id}] ADB 按键失败 (KeyCode={keycode}): {e.stderr}")
+        logger.error(f"[{device_id}] ADB 按键失败 (KeyCode={keycode}): {_decode_output(e.stderr)}")
     except subprocess.TimeoutExpired:
         logger.error(f"[{device_id}] ADB 按键超时 (KeyCode={keycode})")
