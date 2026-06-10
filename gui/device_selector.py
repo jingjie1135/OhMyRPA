@@ -96,29 +96,29 @@ class DeviceSelectorWidget(QWidget):
         left_top_bar.addWidget(filter_label)
         
         self.filter_btn_group = QButtonGroup(self)
-        
+
         btn_all = QPushButton("全部")
         btn_all.setCheckable(True)
         btn_all.setChecked(True)
-        btn_all.setFixedHeight(26)
+        btn_all.setFixedSize(52, 26)
         self.filter_btn_group.addButton(btn_all, 0)
         left_top_bar.addWidget(btn_all)
-        
+
         btn_mumu = QPushButton("MuMu")
         btn_mumu.setCheckable(True)
-        btn_mumu.setFixedHeight(26)
+        btn_mumu.setFixedSize(52, 26)
         self.filter_btn_group.addButton(btn_mumu, 1)
         left_top_bar.addWidget(btn_mumu)
-        
+
         btn_ld = QPushButton("雷电")
         btn_ld.setCheckable(True)
-        btn_ld.setFixedHeight(26)
+        btn_ld.setFixedSize(52, 26)
         self.filter_btn_group.addButton(btn_ld, 2)
         left_top_bar.addWidget(btn_ld)
-        
+
         btn_phone = QPushButton("手机")
         btn_phone.setCheckable(True)
-        btn_phone.setFixedHeight(26)
+        btn_phone.setFixedSize(52, 26)
         self.filter_btn_group.addButton(btn_phone, 3)
         left_top_bar.addWidget(btn_phone)
         
@@ -150,7 +150,10 @@ class DeviceSelectorWidget(QWidget):
         left_layout.addWidget(hint)
         left_layout.addWidget(left_scroll)
         
-        main_hlayout.addWidget(left_widget, stretch=10)
+        # 左侧设备池保持紧凑，把宽度让给右侧批次栏
+        left_widget.setMinimumWidth(250)
+        left_widget.setMaximumWidth(360)
+        main_hlayout.addWidget(left_widget, stretch=4)
 
         # ==================== 右侧：批次信息 ====================
         right_widget = QWidget()
@@ -175,9 +178,10 @@ class DeviceSelectorWidget(QWidget):
         
         right_layout.addLayout(right_top_bar)
         
-        # 右侧批次滚动区域
+        # 右侧批次滚动区域（禁用横向滚动：内容按视口宽度排版，避免按钮被截断）
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setStyleSheet("QScrollArea { border: 1px solid #ddd; border-radius: 4px; background: transparent; }")
         
         right_scroll_content = QWidget()
@@ -187,7 +191,7 @@ class DeviceSelectorWidget(QWidget):
         right_scroll.setWidget(right_scroll_content)
         right_layout.addWidget(right_scroll)
         
-        main_hlayout.addWidget(right_widget, stretch=12)
+        main_hlayout.addWidget(right_widget, stretch=6)
 
         layout.addLayout(main_hlayout)
 
@@ -249,7 +253,7 @@ class DeviceSelectorWidget(QWidget):
                 border: 2px solid {border_color};
                 border-radius: 6px;
                 margin-top: 0px;
-                padding: 8px;
+                padding: 6px;
             }}
         """)
         group.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -265,19 +269,21 @@ class DeviceSelectorWidget(QWidget):
         # 批次名称（可编辑）
         name_edit = QLineEdit(batch["name"])
         name_edit.setFont(create_font(9, bold=True))
-        name_edit.setMaximumWidth(150)
+        name_edit.setFixedWidth(90)
         name_edit.setStyleSheet("border: 1px solid #555; border-radius: 3px; padding: 2px 4px;")
         name_edit.textChanged.connect(lambda t, idx=index: self._on_batch_name_changed(idx, t))
         title_row.addWidget(name_edit)
 
         device_count = len(batch["devices"])
-        count_label = QLabel(f"（{device_count} 台设备）")
+        count_label = QLabel(f"({device_count}台)")
         count_label.setStyleSheet("color: #888;")
         title_row.addWidget(count_label)
 
         if is_selected:
-            sel_label = QLabel("◉ 当前操作目标")
-            sel_label.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold; font-size: 11px;")
+            # 紧凑指示符：绿色边框 + ◉ 共同标识当前操作目标，详情见悬浮提示
+            sel_label = QLabel("◉")
+            sel_label.setToolTip("当前操作目标：左侧勾选的设备将加入此批次")
+            sel_label.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")
             title_row.addWidget(sel_label)
 
         title_row.addStretch()
@@ -307,12 +313,10 @@ class DeviceSelectorWidget(QWidget):
                 type_icon = {"ldplayer": "📱", "mumu": "📱", "phone": "📲"}.get(dev.device_type, "❓")
                 dev_label = QLabel(f"  {type_icon} {icon} {dev.name}")
                 dev_label.setStyleSheet("font-size: 12px;")
-                dev_row.addWidget(dev_label)
-
                 if dev.device_id:
-                    addr_label = QLabel(dev.device_id)
-                    addr_label.setStyleSheet("color: #666; font-size: 11px;")
-                    dev_row.addWidget(addr_label)
+                    # ADB 地址移入悬浮提示，保持批次行紧凑
+                    dev_label.setToolTip(dev.device_id)
+                dev_row.addWidget(dev_label)
 
                 dev_row.addStretch()
 
@@ -459,12 +463,10 @@ class DeviceSelectorWidget(QWidget):
         icon = "🟢" if dev.running else "🔴"
         label = QLabel(f"{icon} {dev.name}")
         label.setFont(create_font())
-        row.addWidget(label)
-
         if dev.device_id:
-            addr = QLabel(f"  {dev.device_id}")
-            addr.setStyleSheet("color: #666; font-size: 11px;")
-            row.addWidget(addr)
+            # ADB 地址移入悬浮提示，保持设备池行紧凑
+            label.setToolTip(dev.device_id)
+        row.addWidget(label)
 
         row.addStretch()
         self._devices_container.addWidget(row_widget)
