@@ -82,74 +82,73 @@ class DeviceSelectorWidget(QWidget):
         top_bar.addWidget(back_btn)
         layout.addLayout(top_bar)
 
+        # 工具栏整排（与左右栏宽度解耦）：筛选 + 刷新 | 添加批次 ... 确认保存
+        toolbar = QHBoxLayout()
+        filter_label = QLabel("筛选:")
+        toolbar.addWidget(filter_label)
+
+        self.filter_btn_group = QButtonGroup(self)
+        for btn_id, text in enumerate(("全部", "MuMu", "雷电", "手机")):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            if btn_id == 0:
+                btn.setChecked(True)
+            self.filter_btn_group.addButton(btn, btn_id)
+            toolbar.addWidget(btn)
+        self.filter_btn_group.buttonClicked.connect(lambda _: self._rebuild_devices_ui())
+
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setToolTip("刷新设备")
+        refresh_btn.setFixedSize(36, 28)
+        # 全局样式 padding 4px 12px 会吃掉小按钮的字形空间，需清零
+        refresh_btn.setStyleSheet("padding: 0;")
+        refresh_btn.clicked.connect(self._refresh_devices)
+        toolbar.addWidget(refresh_btn)
+
+        toolbar.addSpacing(16)
+
+        add_batch_btn = QPushButton("+ 添加批次")
+        add_batch_btn.setFixedHeight(28)
+        add_batch_btn.clicked.connect(self._add_batch)
+        toolbar.addWidget(add_batch_btn)
+
+        toolbar.addStretch()
+
+        confirm_btn = QPushButton("✓ 确认保存")
+        confirm_btn.setFixedHeight(28)
+        confirm_btn.setFixedWidth(100)
+        confirm_btn.setStyleSheet(f"background: {COLOR_SUCCESS}; color: white; border: none; border-radius: 4px;")
+        confirm_btn.clicked.connect(self._on_close)
+        toolbar.addWidget(confirm_btn)
+
+        layout.addLayout(toolbar)
+
         # 主内容区域：左右两栏
         main_hlayout = QHBoxLayout()
-        
+
         # ==================== 左侧：可用设备池 ====================
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 左侧顶部：筛选与刷新
-        left_top_bar = QHBoxLayout()
-        filter_label = QLabel("筛选:")
-        left_top_bar.addWidget(filter_label)
-        
-        self.filter_btn_group = QButtonGroup(self)
 
-        btn_all = QPushButton("全部")
-        btn_all.setCheckable(True)
-        btn_all.setChecked(True)
-        btn_all.setFixedSize(52, 26)
-        self.filter_btn_group.addButton(btn_all, 0)
-        left_top_bar.addWidget(btn_all)
-
-        btn_mumu = QPushButton("MuMu")
-        btn_mumu.setCheckable(True)
-        btn_mumu.setFixedSize(52, 26)
-        self.filter_btn_group.addButton(btn_mumu, 1)
-        left_top_bar.addWidget(btn_mumu)
-
-        btn_ld = QPushButton("雷电")
-        btn_ld.setCheckable(True)
-        btn_ld.setFixedSize(52, 26)
-        self.filter_btn_group.addButton(btn_ld, 2)
-        left_top_bar.addWidget(btn_ld)
-
-        btn_phone = QPushButton("手机")
-        btn_phone.setCheckable(True)
-        btn_phone.setFixedSize(52, 26)
-        self.filter_btn_group.addButton(btn_phone, 3)
-        left_top_bar.addWidget(btn_phone)
-        
-        self.filter_btn_group.buttonClicked.connect(lambda _: self._rebuild_devices_ui())
-        left_top_bar.addStretch()
-        
-        refresh_btn = QPushButton("🔄")
-        refresh_btn.setToolTip("刷新设备")
-        refresh_btn.setFixedSize(36, 28)
-        refresh_btn.clicked.connect(self._refresh_devices)
-        left_top_bar.addWidget(refresh_btn)
-        
-        left_layout.addLayout(left_top_bar)
-        
         # 左侧列表滚动区域
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setStyleSheet("QScrollArea { border: 1px solid #ddd; border-radius: 4px; background: transparent; }")
-        
+
         left_scroll_content = QWidget()
         self._devices_container = QVBoxLayout(left_scroll_content)
         self._devices_container.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._devices_container.setSpacing(6)
         left_scroll.setWidget(left_scroll_content)
-        
+
         hint = QLabel("💡 提示：选中右侧的某个批次后，从列表勾选设备。")
         hint.setStyleSheet("color: #666; font-size: 11px;")
         hint.setWordWrap(True)
         left_layout.addWidget(hint)
         left_layout.addWidget(left_scroll)
-        
+
         # 左侧设备池保持紧凑，把宽度让给右侧批次栏
         left_widget.setMinimumWidth(250)
         left_widget.setMaximumWidth(360)
@@ -159,38 +158,20 @@ class DeviceSelectorWidget(QWidget):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 右侧顶部：添加、保存
-        right_top_bar = QHBoxLayout()
-        add_batch_btn = QPushButton("+ 添加批次")
-        add_batch_btn.setFixedHeight(28)
-        add_batch_btn.clicked.connect(self._add_batch)
-        right_top_bar.addWidget(add_batch_btn)
-        
-        right_top_bar.addStretch()
-        
-        confirm_btn = QPushButton("✓ 确认保存")
-        confirm_btn.setFixedHeight(28)
-        confirm_btn.setFixedWidth(100)
-        confirm_btn.setStyleSheet(f"background: {COLOR_SUCCESS}; color: white; border: none; border-radius: 4px;")
-        confirm_btn.clicked.connect(self._on_close)
-        right_top_bar.addWidget(confirm_btn)
-        
-        right_layout.addLayout(right_top_bar)
-        
+
         # 右侧批次滚动区域（禁用横向滚动：内容按视口宽度排版，避免按钮被截断）
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setStyleSheet("QScrollArea { border: 1px solid #ddd; border-radius: 4px; background: transparent; }")
-        
+
         right_scroll_content = QWidget()
         self._batches_container = QVBoxLayout(right_scroll_content)
         self._batches_container.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._batches_container.setSpacing(8)
         right_scroll.setWidget(right_scroll_content)
         right_layout.addWidget(right_scroll)
-        
+
         main_hlayout.addWidget(right_widget, stretch=6)
 
         layout.addLayout(main_hlayout)
@@ -299,7 +280,8 @@ class DeviceSelectorWidget(QWidget):
         del_btn = QPushButton("🗑")
         del_btn.setFixedSize(36, 28)
         del_btn.setToolTip("删除此批次")
-        del_btn.setStyleSheet(f"color: {COLOR_DANGER};")
+        # padding 清零：全局样式 padding 4px 12px 会把固定尺寸小按钮的字形挤掉
+        del_btn.setStyleSheet(f"color: {COLOR_DANGER}; padding: 0;")
         del_btn.clicked.connect(lambda _, idx=index: self._remove_batch(idx))
         title_row.addWidget(del_btn)
 
@@ -322,8 +304,9 @@ class DeviceSelectorWidget(QWidget):
 
                 # 移除按钮
                 rm_btn = QPushButton("✕")
-                rm_btn.setFixedSize(22, 22)
-                rm_btn.setStyleSheet(f"color: {COLOR_DANGER}; font-size: 10px;")
+                rm_btn.setFixedSize(26, 24)
+                # padding 清零：全局样式 padding 4px 12px 会让 ✕ 字形完全无空间渲染
+                rm_btn.setStyleSheet(f"color: {COLOR_DANGER}; font-size: 12px; padding: 0;")
                 rm_btn.setToolTip("从批次中移除")
                 rm_btn.clicked.connect(lambda _, bi=index, di=j: self._remove_device_from_batch(bi, di))
                 dev_row.addWidget(rm_btn)
