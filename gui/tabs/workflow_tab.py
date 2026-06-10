@@ -180,7 +180,7 @@ class WorkflowTab(QWidget):
 
         refresh_btn = QPushButton("🔄")
         refresh_btn.setToolTip("刷新流程列表")
-        refresh_btn.setFixedWidth(30)
+        refresh_btn.setFixedSize(36, 28)
         refresh_btn.clicked.connect(self._refresh_workflows)
         toolbar.addWidget(refresh_btn)
 

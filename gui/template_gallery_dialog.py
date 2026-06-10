@@ -397,18 +397,19 @@ class TemplateGalleryWidget(QWidget):
 
         # 获取截图
         sw = self._screenshot_widget
-        if sw is None or sw._source_image is None:
+        if sw is None or sw.get_source_image() is None:
             QMessageBox.information(self, "提示", "请先截图或开启实时同步")
             return
 
-        # QImage → OpenCV BGR
-        q_img = sw._source_image
+        # QImage → OpenCV BGR（注意 QImage 每行按 4 字节对齐，必须按 stride 裁切）
+        q_img = sw.get_source_image()
         q_img_rgb = q_img.convertToFormat(QImage.Format.Format_RGB888)
         w, h = q_img_rgb.width(), q_img_rgb.height()
         ptr = q_img_rgb.bits()
-        ptr.setsize(h * w * 3)
+        ptr.setsize(q_img_rgb.sizeInBytes())
+        stride = q_img_rgb.bytesPerLine()
         # .copy() 确保数组拥有独立缓冲，不悬挂引用 QImage 的内存
-        arr = np.array(ptr).reshape(h, w, 3).copy()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(h, stride)[:, :w*3].reshape(h, w, 3).copy()
         screen_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
         # 加载选中的模板（直接用 OpenCV 读取，保证零损失）
@@ -459,13 +460,36 @@ class TemplateGalleryWidget(QWidget):
         os.makedirs(self.pictures_dir, exist_ok=True)
         added = 0
         for src in files:
-            filename = os.path.basename(src)
+            # 文件名清洗：去掉路径并替换非法字符
+            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', os.path.basename(src))
             if not filename.lower().endswith(".png"):
                 filename = os.path.splitext(filename)[0] + ".png"
+            if not os.path.splitext(filename)[0]:
+                continue  # 清洗后文件名为空，跳过
             dst = os.path.join(self.pictures_dir, filename)
-            if not os.path.exists(dst):
-                shutil.copy2(src, dst)
-                added += 1
+            # 目标已存在时弹确认覆盖对话框
+            if os.path.exists(dst):
+                ret = QMessageBox.question(
+                    self, "文件已存在",
+                    f"模板 \"{filename}\" 已存在，是否覆盖？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if ret != QMessageBox.StandardButton.Yes:
+                    continue
+            shutil.copy2(src, dst)
+            # 复制后验证是有效图片，无效则删除并提示
+            try:
+                img = cv2.imdecode(np.fromfile(dst, dtype=np.uint8), cv2.IMREAD_COLOR)
+            except Exception:
+                img = None
+            if img is None:
+                try:
+                    os.remove(dst)
+                except OSError:
+                    pass
+                QMessageBox.warning(self, "无效图片", f"文件 \"{filename}\" 不是有效的图片，已跳过。")
+                continue
+            added += 1
         if added > 0:
             self._load_gallery()
 
@@ -488,7 +512,8 @@ class TemplateGalleryWidget(QWidget):
             except OSError:
                 pass
         from image_engine import clear_cache
-        clear_cache()
+        # 只清除本图库目录的缓存，避免使其他目录的模板缓存全部失效
+        clear_cache(self.pictures_dir)
         self._load_gallery()
 
     # ==================== 关闭/返回 ====================

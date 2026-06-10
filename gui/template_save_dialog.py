@@ -49,6 +49,9 @@ class OffsetPreviewWidget(QWidget):
             self._update_offset_from_mouse(event.pos())
 
     def _update_offset_from_mouse(self, pos):
+        # 视图尺寸非法时跳过，避免除零
+        if self.view_w <= 0 or self.view_h <= 0:
+            return
         # 计算绘制区域的缩放和平移
         rect = self.rect()
         scale = min(rect.width() / self.view_w, rect.height() / self.view_h)
@@ -85,7 +88,11 @@ class OffsetPreviewWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         
         painter.fillRect(self.rect(), QColor("#1a1a2e"))
-        
+
+        # 视图尺寸非法时只画背景，避免除零
+        if self.view_w <= 0 or self.view_h <= 0:
+            return
+
         rect = self.rect()
         scale = min(rect.width() / self.view_w, rect.height() / self.view_h)
         if scale <= 0:

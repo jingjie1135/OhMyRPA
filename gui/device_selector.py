@@ -27,7 +27,7 @@ class _DeviceScanWorker(QThread):
             devices = EmulatorManager.scan_all()
         except Exception:
             import logging
-            logging.getLogger(__name__).debug("设备扫描失败", exc_info=True)
+            logging.getLogger(__name__).warning("设备扫描失败", exc_info=True)
             devices = []
         self.done.emit(devices)
 
@@ -48,6 +48,7 @@ class DeviceSelectorWidget(QWidget):
         self._available_devices: list[DeviceInfo] = []  # 扫描到的所有可用设备
         self._device_checkboxes: dict[str, QCheckBox] = {}  # key -> checkbox 映射
         self._selected_batch_index = -1  # 当前操作的目标批次
+        self._closed = False  # 关闭标志：关闭后忽略迟到的扫描回调
 
         # 从外部传入的已有批次配置
         if current_batches:
@@ -126,7 +127,7 @@ class DeviceSelectorWidget(QWidget):
         
         refresh_btn = QPushButton("🔄")
         refresh_btn.setToolTip("刷新设备")
-        refresh_btn.setFixedSize(30, 26)
+        refresh_btn.setFixedSize(36, 28)
         refresh_btn.clicked.connect(self._refresh_devices)
         left_top_bar.addWidget(refresh_btn)
         
@@ -290,7 +291,7 @@ class DeviceSelectorWidget(QWidget):
 
         # 删除按钮
         del_btn = QPushButton("🗑")
-        del_btn.setFixedSize(28, 28)
+        del_btn.setFixedSize(36, 28)
         del_btn.setToolTip("删除此批次")
         del_btn.setStyleSheet(f"color: {COLOR_DANGER};")
         del_btn.clicked.connect(lambda _, idx=index: self._remove_batch(idx))
@@ -372,13 +373,19 @@ class DeviceSelectorWidget(QWidget):
 
         worker = _DeviceScanWorker(parent=self)
         worker.done.connect(self._on_devices_scanned)
-        worker.finished.connect(lambda: setattr(self, '_scan_worker', None))
+        worker.finished.connect(self._on_scan_worker_finished)
         worker.finished.connect(worker.deleteLater)
         self._scan_worker = worker
         worker.start()
 
+    def _on_scan_worker_finished(self):
+        """扫描线程结束后置空引用（实例方法槽，避免 lambda 强引用已销毁的 self）"""
+        self._scan_worker = None
+
     def _on_devices_scanned(self, devices):
         """扫描完成回调（主线程）：更新设备池并重建 UI。"""
+        if self._closed:
+            return  # 已关闭/返回，忽略迟到回调
         self._available_devices = devices or []
         self._rebuild_devices_ui()
 
@@ -505,6 +512,14 @@ class DeviceSelectorWidget(QWidget):
 
     def _on_close(self):
         """构建批次列表并发出 closed 信号"""
+        # 标记已关闭，并断开扫描回调，防止 Widget 销毁后迟到信号访问失效对象
+        self._closed = True
+        worker = getattr(self, '_scan_worker', None)
+        if worker is not None:
+            try:
+                worker.done.disconnect(self._on_devices_scanned)
+            except (TypeError, RuntimeError):
+                pass  # 已断开/未连接，或 worker 底层对象已销毁
         result = []
         for batch in self._batches:
             result.append({

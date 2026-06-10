@@ -76,6 +76,10 @@ class ScreenshotWidget(QWidget):
         self._matches = matches
         self.update()
 
+    def get_source_image(self):
+        """返回当前截图（QImage），未设置时为 None"""
+        return self._source_image
+
     def set_y_offset(self, offset):
         """更新 Y 偏移量，触发重绘。"""
         self._y_offset = offset
@@ -484,8 +488,10 @@ class ScreenshotWidget(QWidget):
                     if reply != QMessageBox.StandardButton.Yes:
                         continue
 
-                cropped.save(save_path, "PNG")
-                
+                if not cropped.save(save_path, "PNG"):
+                    QMessageBox.warning(self, "保存失败", f"无法写入文件：{save_path}")
+                    continue  # 留在循环让用户重试
+
                 # 保存偏移量到 meta.json
                 import template_meta
                 # custom_save_dir 流程，目录就是 save_dir
@@ -552,8 +558,10 @@ class ScreenshotWidget(QWidget):
                             break
                         n += 1
 
-            cropped.save(save_path, "PNG")
-            
+            if not cropped.save(save_path, "PNG"):
+                QMessageBox.warning(self, "保存失败", f"无法写入文件：{save_path}")
+                continue  # 留在循环让用户重试
+
             # 保存偏移量到 meta.json
             import template_meta
             template_meta.set_meta(save_dir, f"{base_name}@{res_tag}.png", offset_x=ox, offset_y=oy)

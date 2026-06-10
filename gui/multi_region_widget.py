@@ -96,6 +96,16 @@ class MultiRegionWidget(QWidget):
     def get_regions(self) -> list:
         """返回所有已框选区域列表：[(x, y, w, h), ...]"""
         return list(self._regions)
+
+    def get_source_image(self):
+        """返回当前截图（QImage），未设置时为 None"""
+        return self._source_image
+
+    def keep_only_last_region(self):
+        """只保留最后一次框选的区域（供单区域筛选场景使用）"""
+        if len(self._regions) > 1:
+            self._regions = [self._regions[-1]]
+            self.update()
     
     def clear_regions(self):
         """清空所有框选区域"""

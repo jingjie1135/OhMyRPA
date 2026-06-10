@@ -285,8 +285,17 @@ class ImageLibraryTab(QWidget):
         name, ok = QInputDialog.getText(self, "新建图库目录", "请输入目录名称:")
         if not ok or not name.strip():
             return
-        dir_name = name.strip()
+        # 过滤路径分隔符与遍历片段，仅保留单层目录名
+        dir_name = os.path.basename(name.strip().strip("/\\"))
+        if not dir_name or dir_name == "..":
+            QMessageBox.warning(self, "提示", "目录名称无效，请勿包含路径分隔符。")
+            return
         dir_path = os.path.join(TARGETS_DIR, dir_name)
+        # 路径前缀校验：确保最终目录仍在 TARGETS_DIR 内
+        targets_abs = os.path.abspath(TARGETS_DIR)
+        if not os.path.abspath(dir_path).startswith(targets_abs + os.sep):
+            QMessageBox.warning(self, "提示", "目录名称无效。")
+            return
         if os.path.exists(dir_path):
             QMessageBox.warning(self, "提示", f"目录 \"{dir_name}\" 已存在")
             return
@@ -382,18 +391,19 @@ class ImageLibraryTab(QWidget):
 
         main_win = self.window()
         screenshot_widget = getattr(main_win, 'screenshot_widget', None)
-        if screenshot_widget is None or screenshot_widget._source_image is None:
+        if screenshot_widget is None or screenshot_widget.get_source_image() is None:
             QMessageBox.information(self, "提示", "请先截图或开启实时同步")
             return
 
-        # QImage → OpenCV BGR
-        q_img = screenshot_widget._source_image
+        # QImage → OpenCV BGR（注意 QImage 每行按 4 字节对齐，必须按 stride 裁切）
+        q_img = screenshot_widget.get_source_image()
         q_img_rgb = q_img.convertToFormat(QImage.Format.Format_RGB888)
         w, h = q_img_rgb.width(), q_img_rgb.height()
         ptr = q_img_rgb.bits()
-        ptr.setsize(h * w * 3)
+        ptr.setsize(q_img_rgb.sizeInBytes())
+        stride = q_img_rgb.bytesPerLine()
         # .copy() 确保数组拥有独立缓冲，不悬挂引用 QImage 的内存
-        arr = np.array(ptr).reshape(h, w, 3).copy()
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape(h, stride)[:, :w*3].reshape(h, w, 3).copy()
         screen_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
         # 加载选中的模板

@@ -389,7 +389,8 @@ def build_multi_match_props(layout: QFormLayout, node, update_fn, context: dict 
         btn = QPushButton(label)
         btn.setFixedHeight(24)
         if add_fn:
-            btn.clicked.connect(lambda checked=False, a=ad: add_fn(node, a))
+            # 默认参数绑定，避免闭包捕获循环变量/外层变量
+            btn.clicked.connect(lambda checked=False, a=ad, n=node: add_fn(n, a))
         grid.addWidget(btn, idx // 2, idx % 2)
 
     # 删除按钮独占一行
@@ -542,7 +543,7 @@ def _build_sub_find_and_tap(layout, proxy, update_fn, ctx=None):
     edit_tpl.textChanged.connect(lambda t: update_fn("template", t))
 
     browse_btn = QPushButton("📂")
-    browse_btn.setFixedWidth(30)
+    browse_btn.setFixedSize(36, 28)
     def _browse():
         start = pictures_dir if os.path.isdir(pictures_dir) else ""
         path, _ = QFileDialog.getOpenFileName(None, "选择模板", start, "图片 (*.png *.jpg *.bmp)")
@@ -578,7 +579,7 @@ def _build_sub_wait_image(layout, proxy, update_fn, ctx=None):
     edit_tpl.textChanged.connect(lambda t: update_fn("template", t))
 
     browse_btn = QPushButton("📂")
-    browse_btn.setFixedWidth(30)
+    browse_btn.setFixedSize(36, 28)
     def _browse():
         start = pictures_dir if os.path.isdir(pictures_dir) else ""
         path, _ = QFileDialog.getOpenFileName(None, "选择模板", start, "图片 (*.png *.jpg *.bmp)")

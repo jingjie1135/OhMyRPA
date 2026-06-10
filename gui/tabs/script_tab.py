@@ -43,7 +43,8 @@ class _RecordClickWorker(QThread):
             img = screencap_to_memory(self.device_id)
             if img is not None:
                 os.makedirs(self.temp_dir, exist_ok=True)
-                snapshot_name = os.path.join(self.temp_dir, f"step_{int(now)}.png")
+                # 毫秒级时间戳，避免 1 秒内多次点击导致文件名碰撞
+                snapshot_name = os.path.join(self.temp_dir, f"step_{int(now * 1000)}.png")
                 cv2.imencode('.png', img)[1].tofile(snapshot_name)
         
         # 注意：不再执行 tap()，因为用户在预览区的点击已通过 Scrcpy 实时送达设备
@@ -320,16 +321,20 @@ class ScriptTab(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, sleep_node.id)
                 self.action_list.addItem(item)
                 self._refresh_action_list_text()
+                # 等待时间已写入 sleep 节点（已消费），累计清零避免重复计入
+                self._record_elapsed_before_pause = 0
+            else:
+                # 未写入 sleep 节点：累加保存当前段计时，避免暂停丢失
+                # （elapsed_ms = 原累计 + timer.elapsed()，与 _get_recording_elapsed_ms 公式自洽）
+                self._record_elapsed_before_pause = elapsed_ms
             self._recording_paused = True
-            self._record_elapsed_before_pause = 0
             self.record_btn.setText("⏸ 已暂停")
             if hasattr(main_win, 'sidebar_pause_btn'):
                 main_win.sidebar_pause_btn.setText("▶\n继续")
         else:
-            # 继续
+            # 继续：重启分段计时器，保留未消费的累计值（_get 会把两者相加）
             self._recording_paused = False
             self._record_timer.start()
-            self._record_elapsed_before_pause = 0
             self.record_btn.setText("🔴 正在录制")
             if hasattr(main_win, 'sidebar_pause_btn'):
                 main_win.sidebar_pause_btn.setText("⏸\n暂停")
@@ -630,6 +635,7 @@ class ScriptTab(QWidget):
         worker = _RecordClickWorker(
             device_id, x, y,
             temp_dir=self.current_model.temp_dir,
+            enable_snapshot=self._enable_snapshot,
             parent=self
         )
         worker.finished.connect(self._on_record_click_done)
@@ -642,6 +648,9 @@ class ScriptTab(QWidget):
         
     def _on_record_click_done(self, snapshot_name: str, x: int, y: int, timestamp: float):
         """后台录制线程完成后的回调，在主线程安全地更新 UI"""
+        # 停止录制后迟到的回调不再写入幽灵步骤
+        if not self.is_recording:
+            return
         # 1. 生成隐式等待（计算自上次点击的时间差）
         if self.last_record_time > 0:
             diff = round(timestamp - self.last_record_time, 1)
@@ -649,9 +658,12 @@ class ScriptTab(QWidget):
                 sleep_node = ActionNode("sleep", {"seconds": diff})
                 self.current_model.add_action(sleep_node)
                 self._add_node_to_ui_list(sleep_node)
-                
-        # 2. 生成点击指令，并绑定快照证据
-        tap_node = ActionNode("tap", {"x": x, "y": y, "snapshot": snapshot_name})
+
+        # 2. 生成点击指令；仅当存在快照时才绑定 snapshot 键
+        params = {"x": x, "y": y}
+        if snapshot_name:
+            params["snapshot"] = snapshot_name
+        tap_node = ActionNode("tap", params)
         self.current_model.add_action(tap_node)
         self._add_node_to_ui_list(tap_node)
         
@@ -861,6 +873,8 @@ class ScriptTab(QWidget):
             self._refresh_action_list_text()
             if prev_row >= 0 and prev_row < self.action_list.count():
                 self.action_list.setCurrentRow(prev_row)
+                # setCurrentRow 设回同一行不会触发 currentRowChanged，手动刷新属性面板
+                self._on_action_selected(prev_row)
         
         gallery.closed.connect(_on_gallery_closed)
         

@@ -15,6 +15,8 @@ Step 2: 多区域批量抠图
 """
 
 import os
+import logging
+
 import cv2
 import numpy as np
 
@@ -30,9 +32,11 @@ from PyQt6.QtWidgets import (
 from script_model import ScriptModel, ActionNode
 from gui.multi_region_widget import MultiRegionWidget
 
+logger = logging.getLogger(__name__)
+
 
 def _qimage_to_cv(q_img: QImage):
-    """QImage → OpenCV BGR numpy 数组"""
+    """QImage → OpenCV BGR numpy 数组（按 bytesPerLine 处理 4 字节行对齐）"""
     if q_img is None or q_img.isNull():
         return None
     # 转 RGB888 格式
@@ -40,8 +44,9 @@ def _qimage_to_cv(q_img: QImage):
     w, h = q_img.width(), q_img.height()
     ptr = q_img.bits()
     ptr.setsize(q_img.sizeInBytes())
+    stride = q_img.bytesPerLine()
     # .copy() 确保数组拥有独立缓冲，不悬挂引用 QImage 的内存
-    arr = np.array(ptr).reshape(h, w, 3).copy()
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape(h, stride)[:, :w*3].reshape(h, w, 3).copy()
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
@@ -238,10 +243,7 @@ class ConvertDialog(QDialog):
         """框选区域完成后保存（只保留最后一个区域）"""
         self._filter_region = (x, y, w, h)
         # 只保留最后一次框选（Step 1 只需一个筛选区域）
-        regions = self.step1_screenshot.get_regions()
-        if len(regions) > 1:
-            self.step1_screenshot._regions = [regions[-1]]
-            self.step1_screenshot.update()
+        self.step1_screenshot.keep_only_last_region()
         
         # 统计匹配步骤数
         count = 0
@@ -409,9 +411,10 @@ class ConvertDialog(QDialog):
             q_img = QImage(snapshot_path)
             self.step2_widget.update_screenshot(q_img)
         else:
-            # 回退：使用 Step 1 的截图
-            if self.step1_screenshot._source_image:
-                self.step2_widget.update_screenshot(self.step1_screenshot._source_image)
+            # 回退：使用 Step 1 的截图（传副本，避免两个控件共享同一 QImage 引用）
+            step1_img = self.step1_screenshot.get_source_image()
+            if step1_img:
+                self.step2_widget.update_screenshot(step1_img.copy())
 
         # 填充 Step 2 左侧可勾选步骤列表
         self.step2_list.clear()
@@ -550,7 +553,7 @@ class ConvertDialog(QDialog):
                     offset_x=offset_x, offset_y=offset_y
                 )
             except Exception:
-                pass
+                logger.warning("保存模板偏移量失败: %s", filename, exc_info=True)
 
             templates.append({
                 'template': filename,

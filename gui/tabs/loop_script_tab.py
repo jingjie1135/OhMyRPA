@@ -67,7 +67,7 @@ class LoopScriptTab(QWidget):
         
         refresh_btn = QPushButton("🔄")
         refresh_btn.setToolTip("刷新项目列表")
-        refresh_btn.setFixedWidth(30)
+        refresh_btn.setFixedSize(36, 28)
         refresh_btn.clicked.connect(self._refresh_projects)
         toolbar.addWidget(refresh_btn)
         
@@ -237,6 +237,10 @@ class LoopScriptTab(QWidget):
         if idx >= 0:
             self.project_combo.setCurrentIndex(idx)
         self.project_combo.blockSignals(False)
+
+        # 如果有项目但未恢复之前的选中项，手动触发一次加载（与 workflow_tab 兜底逻辑一致）
+        if idx < 0 and self.project_combo.count() > 0:
+            self._on_project_changed(self.project_combo.currentText())
     
     def _on_project_changed(self, project_name: str):
         """下拉框选中脚本后自动加载"""
