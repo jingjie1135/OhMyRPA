@@ -110,6 +110,9 @@ def save_crop_as_template(crop: np.ndarray, save_dir: str,
 
     Returns:
         str: 保存后的文件名
+
+    Raises:
+        RuntimeError: 图片编码失败时抛出
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -122,7 +125,8 @@ def save_crop_as_template(crop: np.ndarray, save_dir: str,
 
     # 使用 imencode 避免中文路径问题
     success, buf = cv2.imencode('.png', crop)
-    if success:
-        buf.tofile(filepath)
+    if not success:
+        raise RuntimeError(f"无法编码图片: {filepath}")
+    buf.tofile(filepath)
 
     return filename

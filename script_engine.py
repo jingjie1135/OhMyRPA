@@ -1,11 +1,14 @@
 import time
 import os
 import cv2
+import logging
 
 from script_model import ScriptModel, ActionNode
 from device_adapter import DeviceAdapter, HybridDeviceAdapter
 import image_engine
 import template_meta
+
+logger = logging.getLogger(__name__)
 
 class ScriptEngine:
     """
@@ -47,8 +50,10 @@ class ScriptEngine:
             return False
             
         self._log("🛡 触发弹窗守卫：正在扫描可能的干扰弹窗...")
+        # 截图前检查中断/暂停（与主循环约定一致：中断通过抛 KeyboardInterrupt 传播）
+        self._check_interrupt_and_pause()
         img = self._adapter.get_frame()
-        if img is None: 
+        if img is None:
             return False
 
         # 一次性加载整个守卫目录的所有模板，避免循环内重复 I/O
@@ -60,6 +65,8 @@ class ScriptEngine:
         if matches:
             name, cx, cy, score = matches[0]
             self._log(f"🛡 弹窗守卫命中目标 [{name}]，执行点击以关闭 ({cx}, {cy})")
+            # 点击前再次检查中断/暂停，避免用户已停止后仍触发点击
+            self._check_interrupt_and_pause()
             self._adapter.tap(cx, cy)
             self.consecutive_fails = 0
             return True
@@ -384,6 +391,7 @@ class ScriptEngine:
             try:
                 sub_model = ScriptModel.load_from_project(project_dir)
             except Exception as e:
+                logger.error("加载脚本项目失败: %s", project_dir, exc_info=True)
                 self._log(f"❌ 加载脚本失败: {e}")
                 return
 

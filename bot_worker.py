@@ -4,12 +4,15 @@ QThread 工作线程：桥接 GUI 界面与业务逻辑。
 """
 
 import threading
+import logging
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QImage
 
 from script_engine import ScriptEngine
 from script_model import ScriptModel
+
+logger = logging.getLogger(__name__)
 
 
 class BotWorker(QThread):
@@ -128,8 +131,9 @@ class BotWorker(QThread):
             q_img = QImage(rgb_img.data, w, h, bytes_per_line,
                            QImage.Format.Format_RGB888).copy()
             self.screenshot_signal.emit(q_img)
-        except Exception:
-            pass  # 忽略转换异常，不影响主流程
+        except Exception as e:
+            # 忽略转换异常，不影响主流程，但记录以便排查
+            logger.debug("截图转换失败: %s", e)
 
     def _on_match(self, matches):
         """匹配结果回调 → 信号。"""

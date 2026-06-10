@@ -43,11 +43,14 @@ class WorkflowRunner(QThread):
         """
         super().__init__(parent)
         self._wf_model = workflow_model
-        self._stopped = False  # 用户手动停止标记
+        # 用户手动停止标记（threading.Event：QThread 的 isInterruptionRequested
+        # 只对 QThread 自身的 run() 有意义，设备线程是普通 threading.Thread，
+        # 统一用 Event 保证跨线程中断语义正确）
+        self._stop_event = threading.Event()
 
     def stop(self):
         """用户主动停止（不关闭实例）"""
-        self._stopped = True
+        self._stop_event.set()
         self.requestInterruption()
 
     def run(self):
@@ -70,7 +73,7 @@ class WorkflowRunner(QThread):
         self.status_signal.emit("流程执行中")
 
         for batch_idx, batch in enumerate(batches):
-            if self._stopped or self.isInterruptionRequested():
+            if self._stop_event.is_set():
                 self._log("⏹ 用户停止，跳过后续批次。")
                 break
 
@@ -98,7 +101,7 @@ class WorkflowRunner(QThread):
             # ===== 阶段1：启动模拟器实例 =====
             self._log(f"🔧 正在启动 {batch_name} 的模拟器实例...")
             for dev in devices:
-                if self._stopped:
+                if self._stop_event.is_set():
                     break
                 if dev.device_type in ("ldplayer", "mumu") and not dev.running:
                     self._log(f"  ▶ 启动 {dev.name} (索引 {dev.index})...")
@@ -121,14 +124,14 @@ class WorkflowRunner(QThread):
                         dev.device_id = f"127.0.0.1:{7555 + dev.index * 10}"
                         self._log(f"  🔗 动态分配 ADB 地址: {dev.device_id}")
 
-            if self._stopped:
+            if self._stop_event.is_set():
                 break
 
             # ===== 阶段2：等待所有设备 ADB 就绪 =====
             self._log(f"⏳ 等待 {batch_name} 的设备 ADB 连接就绪...")
             ready_devices = []
             for dev in devices:
-                if self._stopped:
+                if self._stop_event.is_set():
                     break
                 self._log(f"  ⏳ 等待 {dev.name} ({dev.device_id})...")
                 if EmulatorManager.wait_adb_ready(dev, timeout=60):
@@ -137,7 +140,7 @@ class WorkflowRunner(QThread):
                 else:
                     self._log(f"  ❌ {dev.name} ADB 连接超时，该设备将被跳过")
 
-            if self._stopped:
+            if self._stop_event.is_set():
                 break
 
             if not ready_devices:
@@ -161,7 +164,7 @@ class WorkflowRunner(QThread):
             # 为每台设备创建引擎并在线程中执行
             threads = []
             for dev in ready_devices:
-                if self._stopped:
+                if self._stop_event.is_set():
                     break
                 # 每台设备使用独立的步骤副本，避免多设备并发共享同一批 ActionNode
                 # （执行器未来若写入 params 也不会互相串改）
@@ -178,12 +181,12 @@ class WorkflowRunner(QThread):
             # 等待所有设备线程完成
             for t in threads:
                 while t.is_alive():
-                    if self._stopped:
+                    if self._stop_event.is_set():
                         # 用户停止：不需要等待全部完成，引擎会自行中断
                         break
                     t.join(timeout=1.0)
 
-            if self._stopped:
+            if self._stop_event.is_set():
                 self._log("⏹ 用户停止，等待引擎线程退出...")
                 # 给引擎一点时间自然退出
                 for t in threads:
@@ -205,7 +208,7 @@ class WorkflowRunner(QThread):
                 self._log(f"ℹ️ {batch_name} 配置为不自动关闭实例。")
 
         # ===== 执行结束 =====
-        if self._stopped:
+        if self._stop_event.is_set():
             self._log(f"\n⏹ 流程 [{wf_name}] 被用户中止。")
         else:
             self._log(f"\n🏁 流程 [{wf_name}] 全部批次执行完毕！")
@@ -228,16 +231,22 @@ class WorkflowRunner(QThread):
                 model=script_model,
                 device_id=device_id,
                 pause_event=pause_event,
-                interrupt_check=self.isInterruptionRequested,
+                interrupt_check=self._stop_event.is_set,
                 callbacks={
                     'on_log': lambda msg: self._log(f"  [{device.name}] {msg}"),
                 },
                 adapter=adapter,
             )
 
+            # 启动前预检查（分辨率一致性等）。手动迭代 actions 不经过
+            # engine.run()，需显式调用，返回 False 表示检查失败、中止该设备。
+            if not engine._pre_flight_checks():
+                self._log(f"  ❌ [{device.name}] 启动前预检查未通过，跳过执行。")
+                return
+
             # 线性执行所有步骤
             for action in script_model.actions:
-                if self._stopped or self.isInterruptionRequested():
+                if self._stop_event.is_set():
                     break
                 pause_event.wait()
                 engine._execute_action(action)

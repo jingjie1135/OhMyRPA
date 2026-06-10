@@ -79,9 +79,15 @@ class ScriptConfig:
             except (TypeError, ValueError):
                 return default
 
+        # guard_dir 边界校验：只允许单层目录名，拒绝路径分隔符与 ".."（防目录遍历）
+        raw = data.get("guard_dir", "popups") or "popups"
+        guard_dir = os.path.basename(str(raw).strip().strip("/\\")) or "popups"
+        if guard_dir == "..":
+            guard_dir = "popups"
+
         return cls(
             popup_guard=bool(data.get("popup_guard", True)),
-            guard_dir=data.get("guard_dir", "popups") or "popups",
+            guard_dir=guard_dir,
             guard_trigger_fails=_num("guard_trigger_fails", 3, int),
             resolution=data.get("resolution", ""),
             check_resolution=bool(data.get("check_resolution", True)),
@@ -325,8 +331,9 @@ class ScriptModel:
             target_dir = f"{target_dir}_{n}"
             target_name = os.path.basename(target_dir)
         
-        # 整体复制项目目录
-        shutil.copytree(source_dir, target_dir)
+        # 整体复制项目目录（symlinks=True：保留符号链接本体而非解引用，
+        # 防止恶意链接指向项目外文件被复制进来）
+        shutil.copytree(source_dir, target_dir, symlinks=True)
         
         # 加载并内化所有外部图片引用
         model = cls.load_from_project(target_dir)

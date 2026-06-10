@@ -8,6 +8,7 @@ import sys
 import glob
 import logging
 import string
+import threading
 
 # ===================== 路径配置 =====================
 # 打包后（Nuitka --onefile）：__file__ 指向临时解压目录，需使用 exe 所在目录
@@ -409,14 +410,16 @@ def scan_adb_paths():
 # 自动扫描结果缓存（惰性：首次访问 config.ADB_PATH / config._scanned_adb 时才扫描，
 # 避免 import config 即触发注册表 + WMIC + 全盘 glob 的昂贵副作用）
 _scan_cache = None
+_scan_lock = threading.Lock()
 
 
 def _ensure_scanned():
-    """惰性执行一次模拟器 ADB 扫描并缓存结果。"""
+    """惰性执行一次模拟器 ADB 扫描并缓存结果（线程安全：检查与赋值都在锁内）。"""
     global _scan_cache
-    if _scan_cache is None:
-        _scan_cache = scan_adb_paths()
-    return _scan_cache
+    with _scan_lock:
+        if _scan_cache is None:
+            _scan_cache = scan_adb_paths()
+        return _scan_cache
 
 
 def __getattr__(name):
@@ -438,7 +441,8 @@ def set_adb_path(path):
 def refresh_adb_scan():
     """强制重新扫描模拟器 ADB（GUI 刷新时调用），清除惰性缓存。"""
     global _scan_cache
-    _scan_cache = None
+    with _scan_lock:
+        _scan_cache = None
     return _ensure_scanned()
 
 

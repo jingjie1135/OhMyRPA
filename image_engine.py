@@ -41,42 +41,41 @@ def load_templates(directory):
     Returns:
         list[tuple[str, numpy.ndarray]]: [(模板名称, BGR图像矩阵), ...]
     """
-    # 检查缓存命中
+    # 整个「检查缓存 → 读目录 → 写缓存」在锁内完成，消除 TOCTOU：
+    # 首次加载的 I/O 在锁内可接受（每个目录只发生一次），后续调用直接命中缓存。
     with _cache_lock:
         if directory in _template_cache:
             return _template_cache[directory]
 
-    templates = []
+        templates = []
 
-    if not os.path.isdir(directory):
-        logger.warning("模板目录不存在: %s", directory)
-        with _cache_lock:
+        if not os.path.isdir(directory):
+            logger.warning("模板目录不存在: %s", directory)
             _template_cache[directory] = templates
-        return templates
+            return templates
 
-    for filename in os.listdir(directory):
-        if not filename.lower().endswith(".png"):
-            continue
+        for filename in os.listdir(directory):
+            if not filename.lower().endswith(".png"):
+                continue
 
-        filepath = os.path.join(directory, filename)
-        # 使用 numpy.fromfile + cv2.imdecode 读取，兼容中文路径
-        # cv2.imread 在 Windows 上不支持中文路径，这是已知问题
-        img_array = np.fromfile(filepath, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            filepath = os.path.join(directory, filename)
+            # 使用 numpy.fromfile + cv2.imdecode 读取，兼容中文路径
+            # cv2.imread 在 Windows 上不支持中文路径，这是已知问题
+            img_array = np.fromfile(filepath, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-        if img is None:
-            logger.warning("无法读取模板图片: %s", filepath)
-            continue
+            if img is None:
+                logger.warning("无法读取模板图片: %s", filepath)
+                continue
 
-        # 去掉扩展名作为模板名称
-        name = os.path.splitext(filename)[0]
-        templates.append((name, img))
-        logger.info("已加载模板: %s (%dx%d)", name, img.shape[1], img.shape[0])
+            # 去掉扩展名作为模板名称
+            name = os.path.splitext(filename)[0]
+            templates.append((name, img))
+            logger.info("已加载模板: %s (%dx%d)", name, img.shape[1], img.shape[0])
 
-    with _cache_lock:
         _template_cache[directory] = templates
-    logger.info("目录 [%s] 共加载 %d 个模板", directory, len(templates))
-    return templates
+        logger.info("目录 [%s] 共加载 %d 个模板", directory, len(templates))
+        return templates
 
 
 def _nms_boxes(boxes, iou_threshold):
